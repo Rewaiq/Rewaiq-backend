@@ -37,7 +37,7 @@ const startStream = async (req, res) => {
 // END STREAM SESSION
 const endStream = async (req, res) => {
   const { session_id } = req.body;
-  const MIN_STREAM_SECONDS = 120; // 2 minutes minimum
+  const MIN_STREAM_SECONDS = 60; // 1 minute minimum
   const COINS_PER_STREAM = 10;
 
   try {
