@@ -164,7 +164,7 @@ const login = async (req, res) => {
   }
 };
 
-const jwt = require('jsonwebtoken');
+
 
 // GOOGLE AUTH SUCCESS
 const googleAuthSuccess = async (req, res) => {
