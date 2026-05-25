@@ -17,6 +17,7 @@ const trackRoutes = require('./routes/trackRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const referralRoutes = require('./routes/referralRoutes');
 const paystackRoutes = require('./routes/paystackRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
 const passport = require('./config/passport');
 
 const app = express();
@@ -29,6 +30,7 @@ app.use(session({ secret: process.env.SESSION_SECRET, resave: false, saveUniniti
 app.use(passport.initialize());
 app.use(passport.session());
 app.use('/api/', apiLimiter);
+app.use('/api/notifications', notificationRoutes);
 
 app.get('/', (req, res) => {
   res.json({ message: 'Rewaiq API is live 🚀' });
