@@ -4,7 +4,6 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { sendOTP, sendWelcome } = require('../config/email');
 
-// Generate referral code
 const generateReferralCode = () => {
   return 'RWQ' + crypto.randomBytes(4).toString('hex').toUpperCase();
 };
@@ -21,7 +20,6 @@ const register = async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
     const myReferralCode = generateReferralCode();
 
-    // Check if referred by someone
     let referredBy = null;
     if (referral_code) {
       const referrer = await pool.query('SELECT id FROM users WHERE referral_code = $1', [referral_code]);
@@ -34,16 +32,20 @@ const register = async (req, res) => {
       [full_name, email, hashedPassword, phone, myReferralCode, referredBy]
     );
 
-    // Generate and send OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await pool.query(
       'INSERT INTO otp_codes (email, otp, expires_at) VALUES ($1, $2, $3)',
       [email, otp, expiresAt]
     );
 
-    await sendOTP(email, otp, full_name);
+    // Send OTP email — wrapped so it doesn't crash registration
+    try {
+      await sendOTP(email, otp, full_name);
+    } catch (emailErr) {
+      console.error('OTP email failed:', emailErr.message);
+    }
 
     res.status(201).json({
       message: 'Registration successful. Please verify your email.',
@@ -70,17 +72,12 @@ const verifyOTP = async (req, res) => {
       return res.status(400).json({ message: 'Invalid or expired OTP' });
     }
 
-    // Mark OTP as used
     await pool.query('UPDATE otp_codes SET used = true WHERE id = $1', [otpRecord.rows[0].id]);
-
-    // Verify user
     await pool.query('UPDATE users SET is_email_verified = true WHERE email = $1', [email]);
 
-    // Get user
     const user = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
     const userData = user.rows[0];
 
-    // Handle referral reward
     if (userData.referred_by) {
       await pool.query(
         `INSERT INTO referrals (referrer_id, referred_id, coins_awarded, status)
@@ -89,8 +86,12 @@ const verifyOTP = async (req, res) => {
       );
     }
 
-    // Send welcome email
-    await sendWelcome(email, userData.full_name);
+    // Send welcome email — wrapped so it doesn't crash verification
+    try {
+      await sendWelcome(email, userData.full_name);
+    } catch (emailErr) {
+      console.error('Welcome email failed:', emailErr.message);
+    }
 
     const token = jwt.sign({ id: userData.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
@@ -123,7 +124,12 @@ const resendOTP = async (req, res) => {
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
     await pool.query('INSERT INTO otp_codes (email, otp, expires_at) VALUES ($1, $2, $3)', [email, otp, expiresAt]);
-    await sendOTP(email, otp, user.rows[0].full_name);
+
+    try {
+      await sendOTP(email, otp, user.rows[0].full_name);
+    } catch (emailErr) {
+      console.error('Resend OTP email failed:', emailErr.message);
+    }
 
     res.json({ message: 'OTP resent successfully' });
   } catch (err) {
@@ -136,24 +142,41 @@ const login = async (req, res) => {
   const { email, password } = req.body;
   try {
     const user = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (user.rows.length === 0) await pool.query(
-  `INSERT INTO login_attempts (email, ip_address, success) VALUES ($1, $2, $3)`,
-  [email, req.ip, false]
-); return res.status(400).json({ message: 'Invalid credentials' });
+
+    if (user.rows.length === 0) {
+      try {
+        await pool.query(
+          `INSERT INTO login_attempts (email, ip_address, success) VALUES ($1, $2, $3)`,
+          [email, req.ip, false]
+        );
+      } catch (e) {}
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
 
     const isMatch = await bcrypt.compare(password, user.rows[0].password);
-    if (!isMatch) return res.status(400).json({ message: 'Invalid credentials' });
+    if (!isMatch) {
+      try {
+        await pool.query(
+          `INSERT INTO login_attempts (email, ip_address, success) VALUES ($1, $2, $3)`,
+          [email, req.ip, false]
+        );
+      } catch (e) {}
+      return res.status(400).json({ message: 'Invalid credentials' });
+    }
 
     if (!user.rows[0].is_email_verified) {
       return res.status(400).json({ message: 'Please verify your email first' });
     }
 
+    try {
+      await pool.query(
+        `INSERT INTO login_attempts (email, ip_address, success) VALUES ($1, $2, $3)`,
+        [email, req.ip, true]
+      );
+    } catch (e) {}
+
     const token = jwt.sign({ id: user.rows[0].id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-    await pool.query(
-  `INSERT INTO login_attempts (email, ip_address, success) VALUES ($1, $2, $3)`,
-  [email, req.ip, true]
-);
     res.json({
       message: 'Login successful',
       user: {
@@ -171,8 +194,6 @@ const login = async (req, res) => {
   }
 };
 
-
-
 // GOOGLE AUTH SUCCESS
 const googleAuthSuccess = async (req, res) => {
   try {
@@ -181,10 +202,9 @@ const googleAuthSuccess = async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
-    // Redirect to frontend with token
-    res.redirect(`https://app.rewaiq.com.ng/auth/success?token=${token}`);
+    res.redirect(`https://betarewaiq.netlify.app/auth/success?token=${token}`);
   } catch (err) {
-    res.redirect('https://app.rewaiq.com.ng/auth/error');
+    res.redirect('https://betarewaiq.netlify.app/auth/error');
   }
 };
 
@@ -198,21 +218,24 @@ const forgotPassword = async (req, res) => {
     }
 
     const resetToken = crypto.randomBytes(32).toString('hex');
-    const expires = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes
+    const expires = new Date(Date.now() + 30 * 60 * 1000);
 
     await pool.query(
       'UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE email = $3',
       [resetToken, expires, email]
     );
 
-    // Send reset email
-    const { sendOTP } = require('../config/email');
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     await pool.query(
       'INSERT INTO otp_codes (email, otp, expires_at) VALUES ($1, $2, $3)',
       [email, otp, new Date(Date.now() + 10 * 60 * 1000)]
     );
-    await sendOTP(email, otp, user.rows[0].full_name);
+
+    try {
+      await sendOTP(email, otp, user.rows[0].full_name);
+    } catch (emailErr) {
+      console.error('Password reset email failed:', emailErr.message);
+    }
 
     res.json({ message: 'Password reset OTP sent to your email' });
   } catch (err) {
@@ -249,7 +272,7 @@ const resetPassword = async (req, res) => {
   }
 };
 
- module.exports = { 
+module.exports = {
   register, verifyOTP, resendOTP, login,
   googleAuthSuccess, forgotPassword, resetPassword
 };
