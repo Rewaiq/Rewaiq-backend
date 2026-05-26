@@ -43,7 +43,7 @@ const register = async (req, res) => {
       [email, otp, expiresAt]
     );
 
-    //await sendOTP(email, otp, full_name);
+    await sendOTP(email, otp, full_name);
 
     res.status(201).json({
       message: 'Registration successful. Please verify your email.',
