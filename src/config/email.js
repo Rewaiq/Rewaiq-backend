@@ -8,7 +8,7 @@ const sendEmail = async (to, subject, html) => {
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      from: 'Rewaiq <info@rewaiq.com.ng>',
+      from: 'Rewaiq <info@updates.rewaiq.com.ng>',
       to,
       subject,
       html,
@@ -17,7 +17,7 @@ const sendEmail = async (to, subject, html) => {
 
   if (!response.ok) {
     const error = await response.json();
-    throw new Error(`Email failed: ${error.message}`);
+    throw new Error(`Email failed: ${JSON.stringify(error)}`);
   }
 
   return response.json();
@@ -100,7 +100,7 @@ const sendWelcome = async (email, name) => {
           <table><tr>
             <td style="width:36px;font-size:20px;">📋</td>
             <td><p style="margin:0 0 2px;font-size:14px;font-weight:700;color:#0A1628;">Complete Tasks</p>
-            <p style="margin:0;font-size:13px;color:#777;">Follow, watch, share — earn more coins</p></td>
+            <p style="margin:0;font-size:13px;color:#777;">Follow, watch, share and earn more</p></td>
           </tr></table>
         </td></tr>
         <tr><td style="padding:10px 0;border-bottom:1px solid #f5f5f5;">
@@ -120,7 +120,7 @@ const sendWelcome = async (email, name) => {
       </table>
       <table width="100%" cellpadding="0" cellspacing="0">
         <tr><td align="center">
-          <a href="https://app.rewaiq.com.ng" style="display:inline-block;background:#4a9eff;color:#fff;font-size:15px;font-weight:700;padding:14px 36px;border-radius:12px;text-decoration:none;">
+          <a href="https://betarewaiq.netlify.app" style="display:inline-block;background:#4a9eff;color:#fff;font-size:15px;font-weight:700;padding:14px 36px;border-radius:12px;text-decoration:none;">
             Open Rewaiq →
           </a>
         </td></tr>
