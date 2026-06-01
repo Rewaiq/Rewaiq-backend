@@ -10,7 +10,7 @@ const generateReferralCode = () => {
 
 // REGISTER
 const register = async (req, res) => {
-  const { full_name, email, password, phone, referral_code } = req.body;
+  const { full_name, email, password, phone, referral_code, role } = req.body;
   try {
     const userExists = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
     if (userExists.rows.length > 0) {
@@ -27,10 +27,9 @@ const register = async (req, res) => {
     }
 
     const newUser = await pool.query(
-      `INSERT INTO users (full_name, email, password, phone, referral_code, referred_by)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, full_name, email`,
-      [full_name, email, hashedPassword, phone, myReferralCode, referredBy]
-    );
+      `INSERT INTO users (full_name, email, password, phone, referral_code, referred_by, role)
+ VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, full_name, email, role`
+      [full_name, email, hashedPassword, phone, myReferralCode, referredBy, role || 'user']
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
