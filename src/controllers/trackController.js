@@ -24,11 +24,11 @@ const uploadTrack = async (req, res) => {
   try {
     const embed_url = generateEmbedUrl(original_url, content_type);
     const track = await pool.query(
-      `INSERT INTO tracks 
-       (artist_id, title, description, genre, content_type, original_url, embed_url, cover_image, campaign_coins, target_streams)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *`,
-      [req.user.id, title, description, genre, content_type, original_url, embed_url, cover_image, campaign_coins || 10, target_streams || 1000]
-    );
+  `INSERT INTO tracks 
+   (artist_id, title, description, genre, content_type, original_url, embed_url, cover_image, campaign_coins, target_streams, is_active)
+   VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, false) RETURNING *`,
+  [req.user.id, title, description, genre, content_type, original_url, embed_url, cover_image, campaign_coins || 10, target_streams || 1000]
+);
     res.status(201).json({ message: 'Track uploaded successfully', track: track.rows[0] });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
