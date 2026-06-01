@@ -202,9 +202,9 @@ const googleAuthSuccess = async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
-    res.redirect(`https://betarewaiq.netlify.app/auth/success?token=${token}`);
+    res.redirect(`https://app.rewaiq.com.ng/auth/success?token=${token}`);
   } catch (err) {
-    res.redirect('https://betarewaiq.netlify.app/auth/error');
+    res.redirect('https://app.rewaiq.com.ng/auth/error');
   }
 };
 
