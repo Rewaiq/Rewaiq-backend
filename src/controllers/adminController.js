@@ -120,12 +120,15 @@ const approveCashout = async (req, res) => {
 
 // CREATE TASK (Admin)
 const createTask = async (req, res) => {
-  const { title, description, reward_coins, task_type, expires_at } = req.body;
+  const { title, description, reward_coins, task_type } = req.body;
   try {
+    if (!title || !task_type) {
+      return res.status(400).json({ message: 'Title and task type are required' });
+    }
     const task = await pool.query(
-      `INSERT INTO tasks (title, description, reward_coins, task_type)
-       VALUES ($1, $2, $3, $4) RETURNING *`,
-      [title, description, reward_coins, task_type]
+      `INSERT INTO tasks (title, description, reward_coins, task_type, is_active)
+       VALUES ($1, $2, $3, $4, true) RETURNING *`,
+      [title, description, reward_coins || 30, task_type]
     );
     res.status(201).json({ message: 'Task created', task: task.rows[0] });
   } catch (err) {
