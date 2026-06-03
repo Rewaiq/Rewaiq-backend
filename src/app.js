@@ -6,7 +6,6 @@ const { apiLimiter, authLimiter } = require('./middleware/rateLimit');
 
 require('./config/db');
 const promoRoutes = require('./routes/promoRoutes');
-app.use('/api/promo', promoRoutes);
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const coinRoutes = require('./routes/coinRoutes');
@@ -32,6 +31,7 @@ app.use(passport.initialize());
 app.use(passport.session());
 app.use('/api/', apiLimiter);
 app.use('/api/notifications', notificationRoutes);
+app.use('/api/promo', promoRoutes);
 
 app.get('/', (req, res) => {
   res.json({ message: 'Rewaiq API is live 🚀' });
