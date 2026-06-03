@@ -5,7 +5,8 @@ const session = require('express-session');
 const { apiLimiter, authLimiter } = require('./middleware/rateLimit');
 
 require('./config/db');
-
+const promoRoutes = require('./routes/promoRoutes');
+app.use('/api/promo', promoRoutes);
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
 const coinRoutes = require('./routes/coinRoutes');
