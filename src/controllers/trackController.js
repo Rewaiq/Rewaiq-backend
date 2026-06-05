@@ -42,9 +42,18 @@ const getAllTracks = async (req, res) => {
   try {
     let query = `SELECT t.*, u.full_name as artist_name, u.profile_picture as artist_picture
                  FROM tracks t JOIN users u ON t.artist_id = u.id
-                 WHERE t.is_active = true`;
+                 WHERE 1=1`;
     const params = [];
-    if (type) { query += ` AND t.content_type = $1`; params.push(type); }
+    
+    // Admin sees all tracks, users only see active ones
+    if (req.query.admin !== 'true') {
+      query += ` AND t.is_active = true`;
+    }
+    
+    if (type) { 
+      query += ` AND t.content_type = $${params.length + 1}`; 
+      params.push(type); 
+    }
     query += ` ORDER BY t.created_at DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}`;
     params.push(limit, offset);
     const tracks = await pool.query(query, params);
