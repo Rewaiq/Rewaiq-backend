@@ -198,24 +198,6 @@ const manualCashout = async (req, res, amount, nairaAmountKobo, bank_code, accou
     status: 'pending'
   });
 };
-// Deduct coins immediately
-    await pool.query(
-      'UPDATE users SET coin_balance = coin_balance - $1 WHERE id = $2',
-      [amount, req.user.id]
-    );
-
-    // Record transaction
-    const transaction = await pool.query(
-      `INSERT INTO transactions (user_id, amount, type, status, metadata)
-       VALUES ($1, $2, 'cashout', 'pending', $3) RETURNING id`,
-      [req.user.id, amount, JSON.stringify({
-        naira_amount: nairaAmount,
-        bank_name: bank_name || '',
-        bank_code,
-        account_number,
-        account_name,
-      })]
-    );
 
     // Notify admin via notification (to admin user id = 1, adjust as needed)
     try {
