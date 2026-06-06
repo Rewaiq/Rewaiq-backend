@@ -77,25 +77,128 @@ const earnCoins = async (req, res) => {
 const cashout = async (req, res) => {
   const { amount, bank_code, account_number, account_name, bank_name } = req.body;
   try {
-    const user = await pool.query(
-      'SELECT coin_balance FROM users WHERE id = $1',
-      [req.user.id]
-    );
+    const user = await pool.query('SELECT coin_balance FROM users WHERE id = $1', [req.user.id]);
     const coinBalance = parseInt(user.rows[0]?.coin_balance || 0);
 
-    if (!amount || amount < 1000) {
-      return res.status(400).json({ message: 'Minimum cashout is 1,000 coins (N500)' });
-    }
-    if (coinBalance < amount) {
-      return res.status(400).json({ message: 'Insufficient coin balance' });
-    }
-    if (!bank_code || !account_number || !account_name) {
-      return res.status(400).json({ message: 'Bank details required' });
+    if (!amount || amount < 1000) return res.status(400).json({ message: 'Minimum cashout is 1,000 coins (N500)' });
+    if (coinBalance < amount) return res.status(400).json({ message: 'Insufficient coin balance' });
+    if (!bank_code || !account_number || !account_name) return res.status(400).json({ message: 'Bank details required' });
+
+    const nairaAmount = Math.floor(amount / 2) * 100; // Paystack uses kobo
+
+    // Step 1 — Create transfer recipient on Paystack
+    const recipientRes = await paystackRequest('POST', '/transferrecipient', {
+      type: 'nuban',
+      name: account_name,
+      account_number,
+      bank_code,
+      currency: 'NGN'
+    });
+
+    if (!recipientRes.status) {
+      // Fall back to manual if Paystack fails
+      return await manualCashout(req, res, amount, nairaAmount, bank_code, account_number, account_name, bank_name);
     }
 
-    const nairaAmount = Math.floor(amount / 2);
+    const recipientCode = recipientRes.data.recipient_code;
 
-    // Deduct coins immediately
+    // Step 2 — Initiate transfer
+    const transferRes = await paystackRequest('POST', '/transfer', {
+      source: 'balance',
+      amount: nairaAmount,
+      recipient: recipientCode,
+      reason: `Rewaiq cashout - ${amount} coins`,
+    });
+
+    // Deduct coins
+    await pool.query('UPDATE users SET coin_balance = coin_balance - $1 WHERE id = $2', [amount, req.user.id]);
+
+    const status = transferRes.status ? 'processing' : 'pending';
+
+    // Record transaction
+    const transaction = await pool.query(
+      `INSERT INTO transactions (user_id, amount, type, status, metadata)
+       VALUES ($1, $2, 'cashout', $3, $4) RETURNING id`,
+      [req.user.id, amount, status, JSON.stringify({
+        naira_amount: Math.floor(amount / 2),
+        bank_name: bank_name || '',
+        bank_code, account_number, account_name,
+        paystack_reference: transferRes.data?.reference || null,
+        recipient_code: recipientCode,
+      })]
+    );
+
+    // Notify admin
+    try {
+      await pool.query(
+        `INSERT INTO notifications (user_id, title, message, type)
+         SELECT id, 'New Cashout Request', $1, 'info'
+         FROM users WHERE role = 'admin' LIMIT 1`,
+        [`${account_name} requested N${Math.floor(amount/2).toLocaleString()} NGN`]
+      );
+    } catch (e) {}
+
+    res.json({
+      message: transferRes.status ? 'Cashout initiated via Paystack' : 'Cashout request submitted for manual processing',
+      transaction_id: transaction.rows[0].id,
+      naira_amount: Math.floor(amount / 2),
+      coins_deducted: amount,
+      status,
+    });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// Helper — Paystack API request
+const paystackRequest = (method, path, body = null) => {
+  return new Promise((resolve) => {
+    const data = body ? JSON.stringify(body) : null;
+    const options = {
+      hostname: 'api.paystack.co',
+      port: 443,
+      path,
+      method,
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        'Content-Type': 'application/json',
+        ...(data && { 'Content-Length': Buffer.byteLength(data) })
+      }
+    };
+    const req = https.request(options, (res) => {
+      let responseData = '';
+      res.on('data', chunk => responseData += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(responseData)); }
+        catch { resolve({ status: false }); }
+      });
+    });
+    req.on('error', () => resolve({ status: false }));
+    if (data) req.write(data);
+    req.end();
+  });
+};
+
+// Fallback manual cashout
+const manualCashout = async (req, res, amount, nairaAmountKobo, bank_code, account_number, account_name, bank_name) => {
+  await pool.query('UPDATE users SET coin_balance = coin_balance - $1 WHERE id = $2', [amount, req.user.id]);
+  const transaction = await pool.query(
+    `INSERT INTO transactions (user_id, amount, type, status, metadata)
+     VALUES ($1, $2, 'cashout', 'pending', $3) RETURNING id`,
+    [req.user.id, amount, JSON.stringify({
+      naira_amount: Math.floor(amount / 2),
+      bank_name, bank_code, account_number, account_name
+    })]
+  );
+  return res.json({
+    message: 'Cashout request submitted. Processing within 24-48 hours.',
+    transaction_id: transaction.rows[0].id,
+    naira_amount: Math.floor(amount / 2),
+    coins_deducted: amount,
+    status: 'pending'
+  });
+};
+// Deduct coins immediately
     await pool.query(
       'UPDATE users SET coin_balance = coin_balance - $1 WHERE id = $2',
       [amount, req.user.id]
