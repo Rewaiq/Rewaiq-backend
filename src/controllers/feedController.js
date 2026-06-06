@@ -4,36 +4,31 @@ const pool = require('../config/db');
 const getTasksFeed = async (req, res) => {
   const { type, page = 1, limit = 20 } = req.query;
   const offset = (page - 1) * limit;
-  
   try {
-    // Get user interests for personalization
-    const userResult = await pool.query(
-      'SELECT interests FROM users WHERE id = $1',
-      [req.user.id]
-    );
-    const userInterests = userResult.rows[0]?.interests || [];
-
-    // Build query
     let query = `
       SELECT t.*, 
-        CASE WHEN tc.user_id IS NOT NULL THEN true ELSE false END as completed
+        CASE WHEN tc_user.user_id IS NOT NULL THEN true ELSE false END as completed,
+        COALESCE(tc_count.count, 0) as completion_count
       FROM tasks t
-      LEFT JOIN task_completions tc 
-        ON t.id = tc.task_id AND tc.user_id = $1
+      LEFT JOIN task_completions tc_user 
+        ON t.id = tc_user.task_id AND tc_user.user_id = $1 AND tc_user.status = 'approved'
+      LEFT JOIN (
+        SELECT task_id, COUNT(*) as count 
+        FROM task_completions 
+        WHERE status = 'approved'
+        GROUP BY task_id
+      ) tc_count ON t.id = tc_count.task_id
       WHERE t.is_active = true
     `;
-    
     const params = [req.user.id];
     let paramCount = 2;
 
-    // Filter by type
     if (type) {
       query += ` AND t.task_type = $${paramCount}`;
       params.push(type);
       paramCount++;
     }
 
-    // Order: uncompleted first, highest reward, newest
     query += `
       ORDER BY 
         completed ASC,
@@ -44,11 +39,7 @@ const getTasksFeed = async (req, res) => {
     params.push(limit, offset);
 
     const tasks = await pool.query(query, params);
-
-    // Get total count
-    const countResult = await pool.query(
-      `SELECT COUNT(*) FROM tasks WHERE is_active = true`,
-    );
+    const countResult = await pool.query(`SELECT COUNT(*) FROM tasks WHERE is_active = true`);
 
     res.json({
       tasks: tasks.rows,
