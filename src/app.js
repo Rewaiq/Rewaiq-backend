@@ -19,6 +19,7 @@ const referralRoutes = require('./routes/referralRoutes');
 const paystackRoutes = require('./routes/paystackRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const passport = require('./config/passport');
+const artistRoutes = require('./routes/artistRoutes');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -32,6 +33,7 @@ app.use(passport.session());
 app.use('/api/', apiLimiter);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/promo', promoRoutes);
+app.use('/api/artist', artistRoutes);
 
 app.get('/', (req, res) => {
   res.json({ message: 'Rewaiq API is live 🚀' });
