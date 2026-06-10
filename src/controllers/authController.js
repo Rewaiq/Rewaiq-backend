@@ -26,12 +26,12 @@ const register = async (req, res) => {
       if (referrer.rows.length > 0) referredBy = referrer.rows[0].id;
     }
 
-   const newUser = await pool.query(
-  `INSERT INTO users (full_name, email, password, phone, referral_code, referred_by, role)
-   VALUES ($1, $2, $3, $4, $5, $6, $7)
-   RETURNING id, full_name, email, role`,
-  [full_name, email, hashedPassword, phone, myReferralCode, referredBy, role || 'user']
-);
+    const newUser = await pool.query(
+      `INSERT INTO users (full_name, email, password, phone, referral_code, referred_by, role)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, full_name, email, role`,
+      [full_name, email, hashedPassword, phone, myReferralCode, referredBy, role || 'user']
+    );
 
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
@@ -141,115 +141,106 @@ const resendOTP = async (req, res) => {
 // LOGIN
 const login = async (req, res) => {
   const { email, password } = req.body;
+  
   // Check if IP is currently blocked
-const blocked = await pool.query(
-  `SELECT * FROM blocked_ips
-   WHERE ip_address = $1
-   AND (expires_at IS NULL OR expires_at > NOW())`,
-  [req.ip]
-);
+  const blocked = await pool.query(
+    `SELECT * FROM blocked_ips
+     WHERE ip_address = $1
+     AND (expires_at IS NULL OR expires_at > NOW())`,
+    [req.ip]
+  );
 
-if (blocked.rows.length > 0) {
-  return res.status(403).json({
-    message: 'Too many failed login attempts. Try again later.'
-  });
-}
+  if (blocked.rows.length > 0) {
+    return res.status(403).json({
+      message: 'Too many failed login attempts. Try again later.'
+    });
+  }
+
   try {
     const user = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
 
+    // Scenario 1: User does not exist
     if (user.rows.length === 0) {
       try {
         await pool.query(
-  `INSERT INTO login_attempts (email, ip_address, success)
-   VALUES ($1, $2, false)`,
-  [email, req.ip]
-);
+          `INSERT INTO login_attempts (email, ip_address, success)
+           VALUES ($1, $2, false)`,
+          [email, req.ip]
+        );
 
-// Auto-block abusive IPs
-const failedAttempts = await pool.query(
-  `SELECT COUNT(*)
-   FROM login_attempts
-   WHERE ip_address = $1
-   AND success = false
-   AND created_at > NOW() - INTERVAL '1 hour'`,
-  [req.ip]
-);
+        // Check if IP should be blocked
+        const failedAttempts = await pool.query(
+          `SELECT COUNT(*) FROM login_attempts 
+           WHERE ip_address = $1 
+           AND success = false 
+           AND created_at > NOW() - INTERVAL '1 hour'`,
+          [req.ip]
+        );
 
-if (parseInt(failedAttempts.rows[0].count) >= 10) {
-  await pool.query(
-    `INSERT INTO blocked_ips (ip_address, reason, expires_at)
-     VALUES ($1, $2, NOW() + INTERVAL '24 hours')
-     ON CONFLICT (ip_address)
-     DO UPDATE SET
-       expires_at = NOW() + INTERVAL '24 hours',
-       reason = EXCLUDED.reason`,
-    [req.ip, 'Too many failed login attempts']
-  );
-}
+        if (parseInt(failedAttempts.rows[0].count) >= 10) {
+          await pool.query(
+            `INSERT INTO blocked_ips (ip_address, reason, expires_at)
+             VALUES ($1, $2, NOW() + INTERVAL '24 hours')
+             ON CONFLICT (ip_address) 
+             DO UPDATE SET expires_at = NOW() + INTERVAL '24 hours'`,
+            [req.ip, 'Too many failed login attempts']
+          );
+        }
+      } catch (e) {
+        console.error(e);
+      }
+      return res.status(400).json({ message: 'Invalid credentials' });
     }
 
+    // Scenario 2: User exists but password mismatch
     const isMatch = await bcrypt.compare(password, user.rows[0].password);
     if (!isMatch) {
       try {
         await pool.query(
-  `INSERT INTO login_attempts (email, ip_address, success)
-   VALUES ($1, $2, false)`,
-  [email, req.ip]
-);
+          `INSERT INTO login_attempts (email, ip_address, success)
+           VALUES ($1, $2, false)`,
+          [email, req.ip]
+        );
 
-// Auto-block abusive IPs
-const failedAttempts = await pool.query(
-  `SELECT COUNT(*)
-   FROM login_attempts
-   WHERE ip_address = $1
-   AND success = false
-   AND created_at > NOW() - INTERVAL '1 hour'`,
-  [req.ip]
-);
+        // Check if IP should be blocked
+        const failedAttempts = await pool.query(
+          `SELECT COUNT(*) FROM login_attempts 
+           WHERE ip_address = $1 
+           AND success = false 
+           AND created_at > NOW() - INTERVAL '1 hour'`,
+          [req.ip]
+        );
 
-if (parseInt(failedAttempts.rows[0].count) >= 10) {
-  await pool.query(
-    `INSERT INTO blocked_ips (ip_address, reason, expires_at)
-     VALUES ($1, $2, NOW() + INTERVAL '24 hours')
-     ON CONFLICT (ip_address)
-     DO UPDATE SET
-       expires_at = NOW() + INTERVAL '24 hours',
-       reason = EXCLUDED.reason`,
-    [req.ip, 'Too many failed login attempts']
-  );
-}
-      } catch (e) {}
+        if (parseInt(failedAttempts.rows[0].count) >= 10) {
+          await pool.query(
+            `INSERT INTO blocked_ips (ip_address, reason, expires_at)
+             VALUES ($1, $2, NOW() + INTERVAL '24 hours')
+             ON CONFLICT (ip_address) 
+             DO UPDATE SET expires_at = NOW() + INTERVAL '24 hours'`,
+            [req.ip, 'Too many failed login attempts']
+          );
+        }
+      } catch (e) {
+        console.error(e);
+      }
       return res.status(400).json({ message: 'Invalid credentials' });
     }
 
+    // Scenario 3: Email unverified
     if (!user.rows[0].is_email_verified) {
       return res.status(400).json({ message: 'Please verify your email first' });
     }
 
+    // Scenario 4: Successful login
     try {
       await pool.query(
         `INSERT INTO login_attempts (email, ip_address, success) VALUES ($1, $2, $3)`,
         [email, req.ip, true]
       );
-    } catch (e) {}
-// Check if IP should be blocked
-const failedAttempts = await pool.query(
-  `SELECT COUNT(*) FROM login_attempts 
-   WHERE ip_address = $1 
-   AND success = false 
-   AND created_at > NOW() - INTERVAL '1 hour'`,
-  [req.ip]
-);
+    } catch (e) {
+      console.error(e);
+    }
 
-if (parseInt(failedAttempts.rows[0].count) >= 10) {
-  await pool.query(
-    `INSERT INTO blocked_ips (ip_address, reason, expires_at)
-     VALUES ($1, $2, NOW() + INTERVAL '24 hours')
-     ON CONFLICT (ip_address)
-     DO UPDATE SET expires_at = NOW() + INTERVAL '24 hours'`,
-    [req.ip, 'Too many failed login attempts']
-  );
-}
     const token = jwt.sign({ id: user.rows[0].id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
     res.json({
@@ -268,6 +259,7 @@ if (parseInt(failedAttempts.rows[0].count) >= 10) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
+
 // GOOGLE AUTH SUCCESS
 const googleAuthSuccess = async (req, res) => {
   try {
