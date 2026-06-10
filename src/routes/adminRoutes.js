@@ -87,7 +87,27 @@ router.patch('/tracks/:id/pause', protect, async (req, res) => {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
+// Get blocked IPs
+router.get('/blocked-ips', protect, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT * FROM blocked_ips ORDER BY blocked_at DESC LIMIT 50`
+    );
+    res.json({ blocked_ips: result.rows });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
 
+// Unblock IP
+router.delete('/blocked-ips/:id', protect, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM blocked_ips WHERE id = $1', [req.params.id]);
+    res.json({ message: 'IP unblocked' });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error' });
+  }
+});
 // Resume campaign
 router.patch('/tracks/:id/resume', protect, async (req, res) => {
   try {
