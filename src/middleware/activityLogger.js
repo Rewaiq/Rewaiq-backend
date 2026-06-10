@@ -8,7 +8,7 @@ const logActivity = async (userId, action, details = {}, ip = null) => {
       [userId, action, JSON.stringify(details), ip]
     );
   } catch (err) {
-    console.error('Activity log error:', err.message);
+    // Silent fail
   }
 };
 
