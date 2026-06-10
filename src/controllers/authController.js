@@ -194,7 +194,23 @@ const login = async (req, res) => {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
+// Check if IP should be blocked
+const failedAttempts = await pool.query(
+  `SELECT COUNT(*) FROM login_attempts 
+   WHERE ip_address = $1 
+   AND success = false 
+   AND created_at > NOW() - INTERVAL '1 hour'`,
+  [req.ip]
+);
 
+if (parseInt(failedAttempts.rows[0].count) >= 10) {
+  await pool.query(
+    `INSERT INTO blocked_ips (ip_address, reason, expires_at)
+     VALUES ($1, $2, NOW() + INTERVAL '24 hours')
+     ON CONFLICT (ip_address) DO UPDATE SET expires_at = NOW() + INTERVAL '24 hours'`,
+    [req.ip, 'Too many failed login attempts']
+  );
+}
 // GOOGLE AUTH SUCCESS
 const googleAuthSuccess = async (req, res) => {
   try {
