@@ -51,4 +51,32 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/referrals', referralRoutes);
 app.use('/api/paystack', paystackRoutes);
 
+// Update platform stats daily
+const updatePlatformStats = async () => {
+  try {
+    const pool = require('./config/db');
+    const today = new Date().toISOString().split('T')[0];
+    
+    const [users, streams, coins] = await Promise.all([
+      pool.query('SELECT COUNT(*) FROM users'),
+      pool.query(`SELECT COUNT(*) FROM stream_sessions WHERE DATE(created_at) = $1`, [today]),
+      pool.query(`SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type='stream_earn' AND DATE(created_at) = $1`, [today]),
+    ]);
+
+    await pool.query(
+      `INSERT INTO platform_stats (date, total_users, total_streams, total_coins_earned)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (date) DO UPDATE SET
+       total_users = $2, total_streams = $3, total_coins_earned = $4`,
+      [today, users.rows[0].count, streams.rows[0].count, coins.rows[0].coalesce]
+    );
+  } catch (err) {
+    console.error('Stats update failed:', err.message);
+  }
+};
+
+// Run every hour
+setInterval(updatePlatformStats, 60 * 60 * 1000);
+updatePlatformStats(); // Run on startup
+
 module.exports = app;
