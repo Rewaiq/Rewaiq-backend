@@ -1,10 +1,19 @@
 const express = require('express');
 const router = express.Router();
+const pool = require('../config/db');
+
 const {
-  getDashboardStats, getAllUsers, getPendingCompletions,
-  approveCompletion, rejectCompletion, getPendingCashouts,
-  approveCashout, createTask, deactivateTask
+  getDashboardStats,
+  getAllUsers,
+  getPendingCompletions,
+  approveCompletion,
+  rejectCompletion,
+  getPendingCashouts,
+  approveCashout,
+  createTask,
+  deactivateTask
 } = require('../controllers/adminController');
+
 const { protect } = require('../middleware/auth');
 
 router.get('/stats', protect, getDashboardStats);
@@ -17,33 +26,24 @@ router.patch('/cashouts/:id/approve', protect, approveCashout);
 router.post('/tasks/create', protect, createTask);
 router.patch('/tasks/:id/deactivate', protect, deactivateTask);
 
-router.patch('/tracks/:id/approve', protect, async (req, res) => {
-  try {
-    const pool = require('../config/db');
-    await pool.query('UPDATE tracks SET is_active = true WHERE id = $1', [req.params.id]);
-    res.json({ message: 'Track approved' });
-  } catch (err) {
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
 // Approve track
 router.patch('/tracks/:id/approve', protect, async (req, res) => {
   try {
-    const pool = require('../config/db');
     const { notify } = require('../config/notifications');
-    
-    // Get track with artist info
+
     const track = await pool.query(
-      `SELECT t.*, u.id as artist_user_id 
-       FROM tracks t JOIN users u ON t.artist_id = u.id 
-       WHERE t.id = $1`, [req.params.id]
+      `SELECT t.*, u.id as artist_user_id
+       FROM tracks t
+       JOIN users u ON t.artist_id = u.id
+       WHERE t.id = $1`,
+      [req.params.id]
     );
-    
-    // Approve track
-    await pool.query('UPDATE tracks SET is_active = true WHERE id = $1', [req.params.id]);
-    
-    // Notify artist
+
+    await pool.query(
+      'UPDATE tracks SET is_active = true WHERE id = $1',
+      [req.params.id]
+    );
+
     if (track.rows[0]) {
       await notify(
         track.rows[0].artist_user_id,
@@ -52,27 +52,34 @@ router.patch('/tracks/:id/approve', protect, async (req, res) => {
         'success'
       );
     }
-    
+
     res.json({ message: 'Track approved and artist notified' });
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    res.status(500).json({
+      message: 'Server error',
+      error: err.message
+    });
   }
 });
 
 // Pause campaign
 router.patch('/tracks/:id/pause', protect, async (req, res) => {
   try {
-    const pool = require('../config/db');
     const { notify } = require('../config/notifications');
-    
+
     const track = await pool.query(
-      `SELECT t.*, u.id as artist_user_id 
-       FROM tracks t JOIN users u ON t.artist_id = u.id 
-       WHERE t.id = $1`, [req.params.id]
+      `SELECT t.*, u.id as artist_user_id
+       FROM tracks t
+       JOIN users u ON t.artist_id = u.id
+       WHERE t.id = $1`,
+      [req.params.id]
     );
-    
-    await pool.query('UPDATE tracks SET is_active = false WHERE id = $1', [req.params.id]);
-    
+
+    await pool.query(
+      'UPDATE tracks SET is_active = false WHERE id = $1',
+      [req.params.id]
+    );
+
     if (track.rows[0]) {
       await notify(
         track.rows[0].artist_user_id,
@@ -81,41 +88,76 @@ router.patch('/tracks/:id/pause', protect, async (req, res) => {
         'info'
       );
     }
-    
+
     res.json({ message: 'Campaign paused' });
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    res.status(500).json({
+      message: 'Server error',
+      error: err.message
+    });
   }
 });
+
+// Resume campaign
+router.patch('/tracks/:id/resume', protect, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE tracks SET is_active = true WHERE id = $1',
+      [req.params.id]
+    );
+
+    res.json({ message: 'Campaign resumed' });
+  } catch (err) {
+    res.status(500).json({
+      message: 'Server error',
+      error: err.message
+    });
+  }
+});
+
 // Get blocked IPs
 router.get('/blocked-ips', protect, async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT * FROM blocked_ips ORDER BY blocked_at DESC LIMIT 50`
+      `SELECT * FROM blocked_ips
+       ORDER BY blocked_at DESC
+       LIMIT 50`
     );
-    res.json({ blocked_ips: result.rows });
+
+    res.json({
+      blocked_ips: result.rows
+    });
   } catch (err) {
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({
+      message: 'Server error',
+      error: err.message
+    });
   }
 });
 
 // Unblock IP
 router.delete('/blocked-ips/:id', protect, async (req, res) => {
   try {
-    await pool.query('DELETE FROM blocked_ips WHERE id = $1', [req.params.id]);
-    res.json({ message: 'IP unblocked' });
+    const result = await pool.query(
+      'DELETE FROM blocked_ips WHERE id = $1 RETURNING *',
+      [req.params.id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({
+        message: 'Blocked IP not found'
+      });
+    }
+
+    res.json({
+      message: 'IP unblocked'
+    });
   } catch (err) {
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({
+      message: 'Server error',
+      error: err.message
+    });
   }
 });
-// Resume campaign
-router.patch('/tracks/:id/resume', protect, async (req, res) => {
-  try {
-    const pool = require('../config/db');
-    await pool.query('UPDATE tracks SET is_active = true WHERE id = $1', [req.params.id]);
-    res.json({ message: 'Campaign resumed' });
-  } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-});
+
 module.exports = router;
