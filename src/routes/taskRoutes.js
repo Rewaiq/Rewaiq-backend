@@ -37,4 +37,40 @@ router.get('/:id', protect, async (req, res) => {
   }
 });
 
+router.post('/:id/complete', protect, async (req, res) => {
+  const { id } = req.params;
+  const { proof_url } = req.body;
+  try {
+    // Check task exists and is active
+    const task = await pool.query(
+      'SELECT * FROM tasks WHERE id = $1 AND is_active = true',
+      [id]
+    );
+    if (task.rows.length === 0) {
+      return res.status(404).json({ message: 'Task not found or inactive' });
+    }
+
+    // Check if already submitted
+    const existing = await pool.query(
+      `SELECT * FROM task_completions 
+       WHERE task_id = $1 AND user_id = $2`,
+      [id, req.user.id]
+    );
+    if (existing.rows.length > 0) {
+      return res.status(400).json({ message: 'You have already submitted this task' });
+    }
+
+    // Create completion
+    await pool.query(
+      `INSERT INTO task_completions (task_id, user_id, proof_url, status)
+       VALUES ($1, $2, $3, 'pending')`,
+      [id, req.user.id, proof_url || '']
+    );
+
+    res.status(201).json({ message: 'Task submitted for review' });
+  } catch (err) {
+    res.status(500).json({ message: 'Server error', error: err.message });
+  }
+});
+
 module.exports = router;
