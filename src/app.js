@@ -20,6 +20,7 @@ const paystackRoutes = require('./routes/paystackRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const passport = require('./config/passport');
 const artistRoutes = require('./routes/artistRoutes');
+const emailRoutes = require('./routes/emailRoutes');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -50,6 +51,7 @@ app.use('/api/tracks', trackRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/referrals', referralRoutes);
 app.use('/api/paystack', paystackRoutes);
+app.use('/api/email', emailRoutes);
 
 // Update platform stats daily
 const updatePlatformStats = async () => {
