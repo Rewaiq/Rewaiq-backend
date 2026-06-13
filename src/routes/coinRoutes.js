@@ -1,12 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const {
-  getBalance,
-  earnCoins,
-  cashout,
-  getHistory,
-} = require('../controllers/coinController');
-
+const { getBalance, earnCoins, cashout, getHistory } = require('../controllers/coinController');
 const { protect } = require('../middleware/auth');
 
 router.get('/balance', protect, getBalance);
