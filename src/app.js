@@ -22,10 +22,12 @@ const notificationRoutes = require('./routes/notificationRoutes');
 const passport = require('./config/passport');
 const artistRoutes = require('./routes/artistRoutes');
 const emailRoutes = require('./routes/emailRoutes');
+const ipBlockMiddleware = require('./middleware/ipBlock');
 
 const app = express();
 app.set('trust proxy', 1);
 
+app.use(ipBlockMiddleware);
 app.use('/api/webhooks', webhookRoutes);
 app.use(helmet());
 app.use(cors());
