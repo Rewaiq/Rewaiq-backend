@@ -87,11 +87,9 @@ const cashout = async (req, res) => {
 
     const coinBalance = Number(user.rows[0]?.coin_balance || 0);
 
-    if (!amount || amount < 1000) {
-      return res.status(400).json({
-        message: 'Minimum cashout is 1,000 coins (N500)'
-      });
-    }
+    if (!amount || amount < 200) {
+  return res.status(400).json({ message: 'Minimum cashout is 200 coins (N100)' });
+}
 
     if (coinBalance < amount) {
       return res.status(400).json({
