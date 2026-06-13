@@ -16,25 +16,25 @@ const verifyAccount = async (account_number, bank_code) => {
       },
     };
 
-    const req = https
-      .request(options, (res) => {
-        let data = '';
+    const req = https.request(options, (res) => {
+      let data = '';
 
-        res.on('data', (chunk) => {
-          data += chunk;
-        });
-
-        res.on('end', () => {
-          try {
-            resolve(JSON.parse(data));
-          } catch (err) {
-            resolve({ status: false });
-          }
-        });
-      })
-      .on('error', () => {
-        resolve({ status: false });
+      res.on('data', (chunk) => {
+        data += chunk;
       });
+
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch (err) {
+          resolve({ status: false });
+        }
+      });
+    });
+
+    req.on('error', () => {
+      resolve({ status: false });
+    });
 
     req.end();
   });
@@ -42,12 +42,12 @@ const verifyAccount = async (account_number, bank_code) => {
 
 
 /**
- * CASHOUT CONTROLLER
+ * CASHOUT CONTROLLER (FULL FIXED VERSION)
  */
 const cashout = async (req, res) => {
   try {
+    const { amount, account_number, bank_code, bank_name } = req.body;
     const userId = req.user.id;
-    const { amount, account_number, bank_code } = req.body;
 
     if (!amount || !account_number || !bank_code) {
       return res.status(400).json({
@@ -57,24 +57,52 @@ const cashout = async (req, res) => {
     }
 
     /**
-     * 1. VERIFY ACCOUNT BEFORE ANYTHING
+     * 1. VERIFY ACCOUNT FIRST
      */
     const verification = await verifyAccount(account_number, bank_code);
 
+    /**
+     * ❌ IF VERIFICATION FAILS → NO TRANSFER
+     * → Save pending request ONLY
+     */
     if (!verification.status || !verification.data) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid bank account. Please check details and try again.',
+      await pool.query(
+        `INSERT INTO transactions 
+         (user_id, amount, type, status, metadata)
+         VALUES ($1, $2, 'cashout', 'pending', $3)`,
+        [
+          userId,
+          amount,
+          JSON.stringify({
+            naira_amount: Math.floor(amount / 2),
+            bank_name,
+            bank_code,
+            account_number,
+            account_name: null,
+            note: 'Account verification failed — manual processing required',
+          }),
+        ]
+      );
+
+      return res.json({
+        success: true,
+        message:
+          'Cashout submitted. Will be reviewed and processed manually within 24 hours.',
+        status: 'pending',
       });
     }
 
-    const account_name = verification.data.account_name;
+    /**
+     * ✅ ACCOUNT VERIFIED
+     */
+    const accountName =
+      verification.data?.account_name || 'Verified Account';
 
     /**
      * 2. CHECK USER BALANCE
      */
     const user = await pool.query(
-      'SELECT coins FROM users WHERE id = $1',
+      'SELECT coin_balance FROM users WHERE id = $1',
       [userId]
     );
 
@@ -85,7 +113,7 @@ const cashout = async (req, res) => {
       });
     }
 
-    if (user.rows[0].coins < amount) {
+    if (user.rows[0].coin_balance < amount) {
       return res.status(400).json({
         success: false,
         message: 'Insufficient balance',
@@ -93,28 +121,31 @@ const cashout = async (req, res) => {
     }
 
     /**
-     * 3. DEDUCT COINS FIRST (SAFE TRANSACTION FLOW)
+     * 3. DEDUCT COINS (ONLY AFTER VERIFICATION SUCCESS)
      */
     await pool.query(
-      'UPDATE users SET coins = coins - $1 WHERE id = $2',
+      'UPDATE users SET coin_balance = coin_balance - $1 WHERE id = $2',
       [amount, userId]
     );
 
     /**
-     * 4. SAVE CASHOUT REQUEST (PENDING STATE)
+     * 4. CREATE CASHOUT RECORD (PROCESSING)
      */
-    const cashoutResult = await pool.query(
+    const result = await pool.query(
       `INSERT INTO transactions 
        (user_id, amount, type, status, metadata)
-       VALUES ($1, $2, 'cashout', 'pending', $3)
+       VALUES ($1, $2, 'cashout', 'processing', $3)
        RETURNING id`,
       [
         userId,
         amount,
         JSON.stringify({
-          account_number,
+          naira_amount: Math.floor(amount / 2),
+          bank_name,
           bank_code,
-          account_name,
+          account_number,
+          account_name: accountName,
+          verified: true,
         }),
       ]
     );
@@ -122,13 +153,13 @@ const cashout = async (req, res) => {
     /**
      * 5. RESPONSE
      */
-    return res.status(200).json({
+    return res.json({
       success: true,
-      message: 'Cashout request submitted successfully',
+      message: 'Cashout request is being processed',
       data: {
-        transaction_id: cashoutResult.rows[0].id,
-        account_name,
-        status: 'pending',
+        transaction_id: result.rows[0].id,
+        account_name: accountName,
+        status: 'processing',
       },
     });
   } catch (err) {
