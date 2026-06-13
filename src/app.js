@@ -5,6 +5,7 @@ const session = require('express-session');
 const { apiLimiter, authLimiter } = require('./middleware/rateLimit');
 
 require('./config/db');
+const webhookRoutes = require('./routes/webhookRoutes');
 const promoRoutes = require('./routes/promoRoutes');
 const authRoutes = require('./routes/authRoutes');
 const userRoutes = require('./routes/userRoutes');
@@ -25,6 +26,7 @@ const emailRoutes = require('./routes/emailRoutes');
 const app = express();
 app.set('trust proxy', 1);
 
+app.use('/api/webhooks', webhookRoutes);
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
