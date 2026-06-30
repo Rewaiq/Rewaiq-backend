@@ -87,5 +87,17 @@ const updatePlatformStats = async () => {
 // Run every hour
 setInterval(updatePlatformStats, 60 * 60 * 1000);
 updatePlatformStats(); // Run on startup
+// Custom 404
+app.use((req, res) => {
+  res.status(404).json({ message: 'Route not found' });
+});
 
+// Custom error handler
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({
+    message: 'Something went wrong. Please try again.',
+    status: 'error'
+  });
+});
 module.exports = app;
