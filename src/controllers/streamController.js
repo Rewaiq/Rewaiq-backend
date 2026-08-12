@@ -4,12 +4,43 @@ const pool = require('../config/db');
 const startStream = async (req, res) => {
   const { track_id, track_url } = req.body;
   try {
+    // Auto-clear any stuck active session older than 10 minutes
     const existing = await pool.query(
       `SELECT * FROM stream_sessions WHERE user_id = $1 AND status = 'active'`,
       [req.user.id]
     );
+
     if (existing.rows.length > 0) {
-      return res.status(400).json({ message: 'You already have an active stream session' });
+      const session = existing.rows[0];
+      const minutesOld = (new Date() - new Date(session.start_time)) / 1000 / 60;
+
+      if (minutesOld > 10) {
+        await pool.query(
+          `UPDATE stream_sessions SET status = 'failed', end_time = NOW() WHERE id = $1`,
+          [session.id]
+        );
+      } else {
+        return res.status(400).json({ message: 'You already have an active stream session' });
+      }
+    }
+
+    // Block streaming the same track more than once per day
+    if (track_id) {
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const alreadyStreamed = await pool.query(
+        `SELECT id FROM stream_sessions 
+         WHERE user_id = $1 AND track_id = $2 
+         AND status = 'completed' AND start_time >= $3`,
+        [req.user.id, track_id, today]
+      );
+
+      if (alreadyStreamed.rows.length > 0) {
+        return res.status(400).json({
+          message: 'You have already streamed this track today. Try again tomorrow or pick another track.'
+        });
+      }
     }
 
     const session = await pool.query(
@@ -64,7 +95,7 @@ const endStream = async (req, res) => {
     }
 
     // Get coins from track campaign
-    let coinsToAward = 10;
+    let coinsToAward = 30; // updated default per new coin economics
     if (track_id) {
       const track = await pool.query(
         'SELECT campaign_coins FROM tracks WHERE id = $1',
@@ -92,7 +123,6 @@ const endStream = async (req, res) => {
     const DAILY_CAP = 500;
 
     if (todayTotal >= DAILY_CAP) {
-      // Mark session complete but no coins
       await pool.query(
         `UPDATE stream_sessions SET status = 'completed', end_time = NOW(), 
          duration_seconds = $1, coins_earned = 0 WHERE id = $2`,
@@ -116,21 +146,19 @@ const endStream = async (req, res) => {
       [durationSeconds, actualCoins, session_id]
     );
 
-    // Update track stream count — THIS IS THE KEY FIX
+    // Update track stream count
     if (track_id) {
       await pool.query(
         'UPDATE tracks SET total_streams = COALESCE(total_streams, 0) + 1 WHERE id = $1',
         [track_id]
       );
 
-      // Check if campaign target reached — stop paying out if so
       const trackData = await pool.query(
         'SELECT total_streams, target_streams FROM tracks WHERE id = $1',
         [track_id]
       );
       const t = trackData.rows[0];
       if (t && t.target_streams && t.total_streams >= t.target_streams) {
-        // Deactivate campaign — target reached
         await pool.query(
           `UPDATE tracks SET is_active = false WHERE id = $1`,
           [track_id]
