@@ -40,15 +40,23 @@ const verifyAccount = async (account_number, bank_code) => {
   });
 };
 
-
 /**
- * CASHOUT CONTROLLER (FULL FIXED VERSION)
+ * CASHOUT CONTROLLER
  */
 const cashout = async (req, res) => {
   try {
-    const { amount, account_number, bank_code, bank_name } = req.body;
+    const {
+      amount,
+      account_number,
+      bank_code,
+      bank_name
+    } = req.body;
+
     const userId = req.user.id;
 
+    /**
+     * 1. CHECK REQUIRED FIELDS
+     */
     if (!amount || !account_number || !bank_code) {
       return res.status(400).json({
         success: false,
@@ -57,19 +65,34 @@ const cashout = async (req, res) => {
     }
 
     /**
-     * 1. VERIFY ACCOUNT FIRST
+     * 2. CHECK MINIMUM CASHOUT
+     *
+     * 500 coins = ₦250
      */
-    const verification = await verifyAccount(account_number, bank_code);
+    if (parseInt(amount) < 500) {
+      return res.status(400).json({
+        success: false,
+        message: 'Minimum cashout is 500 coins (N250)',
+      });
+    }
 
     /**
-     * ❌ IF VERIFICATION FAILS → NO TRANSFER
-     * → Save pending request ONLY
+     * 3. VERIFY ACCOUNT FIRST
+     */
+    const verification = await verifyAccount(
+      account_number,
+      bank_code
+    );
+
+    /**
+     * IF VERIFICATION FAILS
+     * Save pending request for manual processing
      */
     if (!verification.status || !verification.data) {
       await pool.query(
-        `INSERT INTO transactions 
-         (user_id, amount, type, status, metadata)
-         VALUES ($1, $2, 'cashout', 'pending', $3)`,
+        `INSERT INTO transactions
+        (user_id, amount, type, status, metadata)
+        VALUES ($1, $2, 'cashout', 'pending', $3)`,
         [
           userId,
           amount,
@@ -93,13 +116,13 @@ const cashout = async (req, res) => {
     }
 
     /**
-     * ✅ ACCOUNT VERIFIED
+     * 4. ACCOUNT VERIFIED
      */
     const accountName =
       verification.data?.account_name || 'Verified Account';
 
     /**
-     * 2. CHECK USER BALANCE
+     * 5. CHECK USER BALANCE
      */
     const user = await pool.query(
       'SELECT coin_balance FROM users WHERE id = $1',
@@ -121,7 +144,8 @@ const cashout = async (req, res) => {
     }
 
     /**
-     * 3. DEDUCT COINS (ONLY AFTER VERIFICATION SUCCESS)
+     * 6. DEDUCT COINS
+     * Only after account verification succeeds
      */
     await pool.query(
       'UPDATE users SET coin_balance = coin_balance - $1 WHERE id = $2',
@@ -129,13 +153,13 @@ const cashout = async (req, res) => {
     );
 
     /**
-     * 4. CREATE CASHOUT RECORD (PROCESSING)
+     * 7. CREATE CASHOUT RECORD
      */
     const result = await pool.query(
-      `INSERT INTO transactions 
-       (user_id, amount, type, status, metadata)
-       VALUES ($1, $2, 'cashout', 'processing', $3)
-       RETURNING id`,
+      `INSERT INTO transactions
+      (user_id, amount, type, status, metadata)
+      VALUES ($1, $2, 'cashout', 'processing', $3)
+      RETURNING id`,
       [
         userId,
         amount,
@@ -151,7 +175,7 @@ const cashout = async (req, res) => {
     );
 
     /**
-     * 5. RESPONSE
+     * 8. RESPONSE
      */
     return res.json({
       success: true,
@@ -162,6 +186,7 @@ const cashout = async (req, res) => {
         status: 'processing',
       },
     });
+
   } catch (err) {
     console.error('Cashout error:', err.message);
 
