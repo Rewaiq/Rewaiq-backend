@@ -10,94 +10,196 @@ const generateReferralCode = () => {
 
 // REGISTER
 const register = async (req, res) => {
-  const { full_name, email, password, phone, referral_code, role } = req.body;
+  const {
+    full_name,
+    email,
+    password,
+    phone,
+    referral_code,
+    role
+  } = req.body;
+
   try {
-    const userExists = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const userExists = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
+
     if (userExists.rows.length > 0) {
-      return res.status(400).json({ message: 'Email already registered' });
+      return res.status(400).json({
+        message: 'Email already registered'
+      });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
     const myReferralCode = generateReferralCode();
 
     let referredBy = null;
+
     if (referral_code) {
-      const referrer = await pool.query('SELECT id FROM users WHERE referral_code = $1', [referral_code]);
-      if (referrer.rows.length > 0) referredBy = referrer.rows[0].id;
+      const referrer = await pool.query(
+        'SELECT id FROM users WHERE referral_code = $1',
+        [referral_code]
+      );
+
+      if (referrer.rows.length > 0) {
+        referredBy = referrer.rows[0].id;
+      }
     }
 
+    // CREATE USER
     const newUser = await pool.query(
-      `INSERT INTO users (full_name, email, password, phone, referral_code, referred_by, role)
+      `INSERT INTO users
+        (full_name, email, password, phone, referral_code, referred_by, role)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, full_name, email, role`,
-      [full_name, email, hashedPassword, phone, myReferralCode, referredBy, role || 'user']
+      [
+        full_name,
+        email,
+        hashedPassword,
+        phone,
+        myReferralCode,
+        referredBy,
+        role || 'user'
+      ]
     );
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    /*
+     * WELCOME BONUS
+     * New users receive 10 coins immediately after registration.
+     */
+    await pool.query(
+      `INSERT INTO transactions
+        (user_id, amount, type, status)
+       VALUES ($1, 10, 'welcome_bonus', 'completed')`,
+      [newUser.rows[0].id]
+    );
 
     await pool.query(
-      'INSERT INTO otp_codes (email, otp, expires_at) VALUES ($1, $2, $3)',
+      'UPDATE users SET coin_balance = coin_balance + 10 WHERE id = $1',
+      [newUser.rows[0].id]
+    );
+
+    // CREATE OTP
+    const otp = Math.floor(
+      100000 + Math.random() * 900000
+    ).toString();
+
+    const expiresAt = new Date(
+      Date.now() + 10 * 60 * 1000
+    );
+
+    await pool.query(
+      `INSERT INTO otp_codes
+        (email, otp, expires_at)
+       VALUES ($1, $2, $3)`,
       [email, otp, expiresAt]
     );
 
-    // Send OTP email — wrapped so it doesn't crash registration
+    // SEND OTP EMAIL
+    // Wrapped so email failure doesn't crash registration.
     try {
       await sendOTP(email, otp, full_name);
     } catch (emailErr) {
-      console.error('OTP email failed:', emailErr.message);
+      console.error(
+        'OTP email failed:',
+        emailErr.message
+      );
     }
 
-    res.status(201).json({
-      message: 'Registration successful. Please verify your email.',
+    return res.status(201).json({
+      message:
+        'Registration successful. Please verify your email.',
       user_id: newUser.rows[0].id,
-      email
+      email,
+      welcome_bonus: 10
     });
+
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    console.error('Registration error:', err);
+
+    return res.status(500).json({
+      message: 'Server error',
+      error: err.message
+    });
   }
 };
+
 
 // VERIFY OTP
 const verifyOTP = async (req, res) => {
   const { email, otp } = req.body;
+
   try {
     const otpRecord = await pool.query(
-      `SELECT * FROM otp_codes 
-       WHERE email = $1 AND otp = $2 AND used = false AND expires_at > NOW()
-       ORDER BY created_at DESC LIMIT 1`,
+      `SELECT * FROM otp_codes
+       WHERE email = $1
+       AND otp = $2
+       AND used = false
+       AND expires_at > NOW()
+       ORDER BY created_at DESC
+       LIMIT 1`,
       [email, otp]
     );
 
     if (otpRecord.rows.length === 0) {
-      return res.status(400).json({ message: 'Invalid or expired OTP' });
+      return res.status(400).json({
+        message: 'Invalid or expired OTP'
+      });
     }
 
-    await pool.query('UPDATE otp_codes SET used = true WHERE id = $1', [otpRecord.rows[0].id]);
-    await pool.query('UPDATE users SET is_email_verified = true WHERE email = $1', [email]);
+    await pool.query(
+      'UPDATE otp_codes SET used = true WHERE id = $1',
+      [otpRecord.rows[0].id]
+    );
 
-    const user = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    await pool.query(
+      'UPDATE users SET is_email_verified = true WHERE email = $1',
+      [email]
+    );
+
+    const user = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
+
     const userData = user.rows[0];
 
+    // REFERRAL BONUS
     if (userData.referred_by) {
       await pool.query(
-        `INSERT INTO referrals (referrer_id, referred_id, coins_awarded, status)
+        `INSERT INTO referrals
+          (referrer_id, referred_id, coins_awarded, status)
          VALUES ($1, $2, 100, 'pending')`,
-        [userData.referred_by, userData.id]
+        [
+          userData.referred_by,
+          userData.id
+        ]
       );
     }
 
-    // Send welcome email — wrapped so it doesn't crash verification
+    // SEND WELCOME EMAIL
     try {
-      await sendWelcome(email, userData.full_name);
+      await sendWelcome(
+        email,
+        userData.full_name
+      );
     } catch (emailErr) {
-      console.error('Welcome email failed:', emailErr.message);
+      console.error(
+        'Welcome email failed:',
+        emailErr.message
+      );
     }
 
-    const token = jwt.sign({ id: userData.id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign(
+      { id: userData.id },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
 
-    res.json({
+    return res.json({
       message: 'Email verified successfully',
+
       user: {
         id: userData.id,
         full_name: userData.full_name,
@@ -106,42 +208,86 @@ const verifyOTP = async (req, res) => {
         coin_balance: userData.coin_balance,
         referral_code: userData.referral_code
       },
+
       token
     });
+
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    return res.status(500).json({
+      message: 'Server error',
+      error: err.message
+    });
   }
 };
+
 
 // RESEND OTP
 const resendOTP = async (req, res) => {
   const { email } = req.body;
+
   try {
-    const user = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
-    if (user.rows.length === 0) return res.status(404).json({ message: 'User not found' });
-    if (user.rows[0].is_email_verified) return res.status(400).json({ message: 'Email already verified' });
+    const user = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    await pool.query('INSERT INTO otp_codes (email, otp, expires_at) VALUES ($1, $2, $3)', [email, otp, expiresAt]);
-
-    try {
-      await sendOTP(email, otp, user.rows[0].full_name);
-    } catch (emailErr) {
-      console.error('Resend OTP email failed:', emailErr.message);
+    if (user.rows.length === 0) {
+      return res.status(404).json({
+        message: 'User not found'
+      });
     }
 
-    res.json({ message: 'OTP resent successfully' });
+    if (user.rows[0].is_email_verified) {
+      return res.status(400).json({
+        message: 'Email already verified'
+      });
+    }
+
+    const otp = Math.floor(
+      100000 + Math.random() * 900000
+    ).toString();
+
+    const expiresAt = new Date(
+      Date.now() + 10 * 60 * 1000
+    );
+
+    await pool.query(
+      `INSERT INTO otp_codes
+        (email, otp, expires_at)
+       VALUES ($1, $2, $3)`,
+      [email, otp, expiresAt]
+    );
+
+    try {
+      await sendOTP(
+        email,
+        otp,
+        user.rows[0].full_name
+      );
+    } catch (emailErr) {
+      console.error(
+        'Resend OTP email failed:',
+        emailErr.message
+      );
+    }
+
+    return res.json({
+      message: 'OTP resent successfully'
+    });
+
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    return res.status(500).json({
+      message: 'Server error',
+      error: err.message
+    });
   }
 };
+
 
 // LOGIN
 const login = async (req, res) => {
   const { email, password } = req.body;
-  
+
   // Check if IP is currently blocked
   const blocked = await pool.query(
     `SELECT * FROM blocked_ips
@@ -152,99 +298,144 @@ const login = async (req, res) => {
 
   if (blocked.rows.length > 0) {
     return res.status(403).json({
-      message: 'Too many failed login attempts. Try again later.'
+      message:
+        'Too many failed login attempts. Try again later.'
     });
   }
 
   try {
-    const user = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
 
-    // Scenario 1: User does not exist
+    // USER DOES NOT EXIST
     if (user.rows.length === 0) {
       try {
         await pool.query(
-          `INSERT INTO login_attempts (email, ip_address, success)
+          `INSERT INTO login_attempts
+            (email, ip_address, success)
            VALUES ($1, $2, false)`,
           [email, req.ip]
         );
 
-        // Check if IP should be blocked
         const failedAttempts = await pool.query(
-          `SELECT COUNT(*) FROM login_attempts 
-           WHERE ip_address = $1 
-           AND success = false 
+          `SELECT COUNT(*)
+           FROM login_attempts
+           WHERE ip_address = $1
+           AND success = false
            AND created_at > NOW() - INTERVAL '1 hour'`,
           [req.ip]
         );
 
-        if (parseInt(failedAttempts.rows[0].count) >= 10) {
+        if (
+          parseInt(
+            failedAttempts.rows[0].count
+          ) >= 10
+        ) {
           await pool.query(
-            `INSERT INTO blocked_ips (ip_address, reason, expires_at)
+            `INSERT INTO blocked_ips
+              (ip_address, reason, expires_at)
              VALUES ($1, $2, NOW() + INTERVAL '24 hours')
-             ON CONFLICT (ip_address) 
-             DO UPDATE SET expires_at = NOW() + INTERVAL '24 hours'`,
-            [req.ip, 'Too many failed login attempts']
+             ON CONFLICT (ip_address)
+             DO UPDATE SET
+               expires_at = NOW() + INTERVAL '24 hours'`,
+            [
+              req.ip,
+              'Too many failed login attempts'
+            ]
           );
         }
+
       } catch (e) {
         console.error(e);
       }
-      return res.status(400).json({ message: 'Invalid credentials' });
+
+      return res.status(400).json({
+        message: 'Invalid credentials'
+      });
     }
 
-    // Scenario 2: User exists but password mismatch
-    const isMatch = await bcrypt.compare(password, user.rows[0].password);
+    // PASSWORD MISMATCH
+    const isMatch = await bcrypt.compare(
+      password,
+      user.rows[0].password
+    );
+
     if (!isMatch) {
       try {
         await pool.query(
-          `INSERT INTO login_attempts (email, ip_address, success)
+          `INSERT INTO login_attempts
+            (email, ip_address, success)
            VALUES ($1, $2, false)`,
           [email, req.ip]
         );
 
-        // Check if IP should be blocked
         const failedAttempts = await pool.query(
-          `SELECT COUNT(*) FROM login_attempts 
-           WHERE ip_address = $1 
-           AND success = false 
+          `SELECT COUNT(*)
+           FROM login_attempts
+           WHERE ip_address = $1
+           AND success = false
            AND created_at > NOW() - INTERVAL '1 hour'`,
           [req.ip]
         );
 
-        if (parseInt(failedAttempts.rows[0].count) >= 10) {
+        if (
+          parseInt(
+            failedAttempts.rows[0].count
+          ) >= 10
+        ) {
           await pool.query(
-            `INSERT INTO blocked_ips (ip_address, reason, expires_at)
+            `INSERT INTO blocked_ips
+              (ip_address, reason, expires_at)
              VALUES ($1, $2, NOW() + INTERVAL '24 hours')
-             ON CONFLICT (ip_address) 
-             DO UPDATE SET expires_at = NOW() + INTERVAL '24 hours'`,
-            [req.ip, 'Too many failed login attempts']
+             ON CONFLICT (ip_address)
+             DO UPDATE SET
+               expires_at = NOW() + INTERVAL '24 hours'`,
+            [
+              req.ip,
+              'Too many failed login attempts'
+            ]
           );
         }
+
       } catch (e) {
         console.error(e);
       }
-      return res.status(400).json({ message: 'Invalid credentials' });
+
+      return res.status(400).json({
+        message: 'Invalid credentials'
+      });
     }
 
-    // Scenario 3: Email unverified
+    // EMAIL UNVERIFIED
     if (!user.rows[0].is_email_verified) {
-      return res.status(400).json({ message: 'Please verify your email first' });
+      return res.status(400).json({
+        message: 'Please verify your email first'
+      });
     }
 
-    // Scenario 4: Successful login
+    // SUCCESSFUL LOGIN
     try {
       await pool.query(
-        `INSERT INTO login_attempts (email, ip_address, success) VALUES ($1, $2, $3)`,
+        `INSERT INTO login_attempts
+          (email, ip_address, success)
+         VALUES ($1, $2, $3)`,
         [email, req.ip, true]
       );
     } catch (e) {
       console.error(e);
     }
 
-    const token = jwt.sign({ id: user.rows[0].id }, process.env.JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign(
+      { id: user.rows[0].id },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
 
-    res.json({
+    return res.json({
       message: 'Login successful',
+
       user: {
         id: user.rows[0].id,
         full_name: user.rows[0].full_name,
@@ -253,12 +444,18 @@ const login = async (req, res) => {
         coin_balance: user.rows[0].coin_balance,
         referral_code: user.rows[0].referral_code
       },
+
       token
     });
+
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    return res.status(500).json({
+      message: 'Server error',
+      error: err.message
+    });
   }
 };
+
 
 // GOOGLE AUTH SUCCESS
 const googleAuthSuccess = async (req, res) => {
@@ -268,77 +465,157 @@ const googleAuthSuccess = async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '7d' }
     );
-    res.redirect(`https://app.rewaiq.com.ng/auth/success?token=${token}`);
+
+    res.redirect(
+      `https://app.rewaiq.com.ng/auth/success?token=${token}`
+    );
+
   } catch (err) {
-    res.redirect('https://app.rewaiq.com.ng/auth/error');
+    res.redirect(
+      'https://app.rewaiq.com.ng/auth/error'
+    );
   }
 };
+
 
 // FORGOT PASSWORD
 const forgotPassword = async (req, res) => {
   const { email } = req.body;
+
   try {
-    const user = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    const user = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [email]
+    );
+
     if (user.rows.length === 0) {
-      return res.status(404).json({ message: 'Email not found' });
+      return res.status(404).json({
+        message: 'Email not found'
+      });
     }
 
-    const resetToken = crypto.randomBytes(32).toString('hex');
-    const expires = new Date(Date.now() + 30 * 60 * 1000);
+    const resetToken = crypto
+      .randomBytes(32)
+      .toString('hex');
+
+    const expires = new Date(
+      Date.now() + 30 * 60 * 1000
+    );
 
     await pool.query(
-      'UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE email = $3',
+      `UPDATE users
+       SET reset_token = $1,
+           reset_token_expires = $2
+       WHERE email = $3`,
       [resetToken, expires, email]
     );
 
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = Math.floor(
+      100000 + Math.random() * 900000
+    ).toString();
+
     await pool.query(
-      'INSERT INTO otp_codes (email, otp, expires_at) VALUES ($1, $2, $3)',
-      [email, otp, new Date(Date.now() + 10 * 60 * 1000)]
+      `INSERT INTO otp_codes
+        (email, otp, expires_at)
+       VALUES ($1, $2, $3)`,
+      [
+        email,
+        otp,
+        new Date(Date.now() + 10 * 60 * 1000)
+      ]
     );
 
     try {
-      await sendOTP(email, otp, user.rows[0].full_name);
+      await sendOTP(
+        email,
+        otp,
+        user.rows[0].full_name
+      );
     } catch (emailErr) {
-      console.error('Password reset email failed:', emailErr.message);
+      console.error(
+        'Password reset email failed:',
+        emailErr.message
+      );
     }
 
-    res.json({ message: 'Password reset OTP sent to your email' });
+    return res.json({
+      message: 'Password reset OTP sent to your email'
+    });
+
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    return res.status(500).json({
+      message: 'Server error',
+      error: err.message
+    });
   }
 };
 
+
 // RESET PASSWORD
 const resetPassword = async (req, res) => {
-  const { email, otp, new_password } = req.body;
+  const {
+    email,
+    otp,
+    new_password
+  } = req.body;
+
   try {
     const otpRecord = await pool.query(
-      `SELECT * FROM otp_codes 
-       WHERE email = $1 AND otp = $2 AND used = false AND expires_at > NOW()
-       ORDER BY created_at DESC LIMIT 1`,
+      `SELECT * FROM otp_codes
+       WHERE email = $1
+       AND otp = $2
+       AND used = false
+       AND expires_at > NOW()
+       ORDER BY created_at DESC
+       LIMIT 1`,
       [email, otp]
     );
 
     if (otpRecord.rows.length === 0) {
-      return res.status(400).json({ message: 'Invalid or expired OTP' });
+      return res.status(400).json({
+        message: 'Invalid or expired OTP'
+      });
     }
 
-    await pool.query('UPDATE otp_codes SET used = true WHERE id = $1', [otpRecord.rows[0].id]);
-
-    const hashedPassword = await bcrypt.hash(new_password, 10);
     await pool.query(
-      'UPDATE users SET password = $1, reset_token = NULL, reset_token_expires = NULL WHERE email = $2',
+      'UPDATE otp_codes SET used = true WHERE id = $1',
+      [otpRecord.rows[0].id]
+    );
+
+    const hashedPassword = await bcrypt.hash(
+      new_password,
+      10
+    );
+
+    await pool.query(
+      `UPDATE users
+       SET password = $1,
+           reset_token = NULL,
+           reset_token_expires = NULL
+       WHERE email = $2`,
       [hashedPassword, email]
     );
 
-    res.json({ message: 'Password reset successful. Please login.' });
+    return res.json({
+      message:
+        'Password reset successful. Please login.'
+    });
+
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    return res.status(500).json({
+      message: 'Server error',
+      error: err.message
+    });
   }
 };
 
+
 module.exports = {
-  register, verifyOTP, resendOTP, login,
-  googleAuthSuccess, forgotPassword, resetPassword
+  register,
+  verifyOTP,
+  resendOTP,
+  login,
+  googleAuthSuccess,
+  forgotPassword,
+  resetPassword
 };
