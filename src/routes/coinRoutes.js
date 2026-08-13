@@ -162,8 +162,8 @@ router.post('/cashout', protect, async (req, res) => {
     );
     const coinBalance = parseInt(user.rows[0]?.coin_balance || 0);
 
-    if (!amount || parseInt(amount) < 200) {
-      return res.status(400).json({ message: 'Minimum cashout is 200 coins (N100)' });
+    if (!amount || parseInt(amount) < 500) {
+      return res.status(400).json({ message: 'Minimum cashout is 500 coins (N400)' });
     }
     if (coinBalance < parseInt(amount)) {
       return res.status(400).json({ message: 'Insufficient coin balance' });
