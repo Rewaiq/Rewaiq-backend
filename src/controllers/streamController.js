@@ -4,6 +4,10 @@ const MIN_STREAM_SECONDS = 60;
 const DAILY_CAP = 500;
 const STALE_SESSION_MINUTES = 10;
 
+// Heartbeat should normally arrive every 5 seconds.
+// We allow up to 15 seconds between heartbeats.
+const MAX_HEARTBEAT_GAP = 15;
+
 // =========================================================
 // START STREAM SESSION
 // =========================================================
@@ -65,19 +69,22 @@ const startStream = async (req, res) => {
       SET
         status = 'failed',
         end_time = NOW(),
-        duration_seconds = GREATEST(
-          0,
-          EXTRACT(EPOCH FROM (NOW() - start_time))::integer
+        duration_seconds = LEAST(
+          COALESCE(valid_seconds, 0),
+          $1
         )
-      WHERE user_id = $1
+      WHERE user_id = $2
         AND status = 'active'
         AND start_time < NOW() - INTERVAL '${STALE_SESSION_MINUTES} minutes'
       `,
-      [req.user.id]
+      [
+        MIN_STREAM_SECONDS,
+        req.user.id
+      ]
     );
 
     // -----------------------------------------------------
-    // Check for a genuinely active session
+    // Check for an existing active session
     // -----------------------------------------------------
 
     const existing = await pool.query(
@@ -119,7 +126,10 @@ const startStream = async (req, res) => {
         AND start_time >= CURRENT_DATE
       LIMIT 1
       `,
-      [req.user.id, track_id]
+      [
+        req.user.id,
+        track_id
+      ]
     );
 
     if (alreadyStreamed.rows.length > 0) {
@@ -143,7 +153,13 @@ const startStream = async (req, res) => {
         start_time,
         status,
         duration_seconds,
-        coins_earned
+        coins_earned,
+        valid_seconds,
+        last_heartbeat,
+        heartbeat_count,
+        challenge_required,
+        challenge_passed,
+        challenge_answer
       )
       VALUES
       (
@@ -153,7 +169,13 @@ const startStream = async (req, res) => {
         NOW(),
         'active',
         0,
-        0
+        0,
+        0,
+        NOW(),
+        0,
+        FALSE,
+        FALSE,
+        NULL
       )
       RETURNING *
       `,
@@ -176,8 +198,310 @@ const startStream = async (req, res) => {
     );
 
     return res.status(500).json({
-      message: 'Server error',
-      error: err.message
+      message: 'Server error'
+    });
+  }
+};
+
+
+// =========================================================
+// STREAM HEARTBEAT
+// =========================================================
+
+const heartbeatStream = async (req, res) => {
+  const {
+    session_id,
+    visible,
+    focused
+  } = req.body;
+
+  try {
+    if (!session_id) {
+      return res.status(400).json({
+        message: 'Session ID is required'
+      });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        start_time,
+        last_heartbeat,
+        valid_seconds,
+        heartbeat_count,
+        challenge_required,
+        challenge_passed,
+        status
+      FROM stream_sessions
+      WHERE id = $1
+        AND user_id = $2
+      `,
+      [
+        session_id,
+        req.user.id
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        message: 'Stream session not found'
+      });
+    }
+
+    const session = result.rows[0];
+
+    if (session.status !== 'active') {
+      return res.status(400).json({
+        message: 'Stream session is no longer active'
+      });
+    }
+
+    const now = Date.now();
+
+    const previousHeartbeat = session.last_heartbeat
+      ? new Date(session.last_heartbeat).getTime()
+      : new Date(session.start_time).getTime();
+
+    let elapsed = Math.floor(
+      (now - previousHeartbeat) / 1000
+    );
+
+    // -----------------------------------------------------
+    // Protect against invalid client timing
+    // -----------------------------------------------------
+
+    if (elapsed < 0) {
+      elapsed = 0;
+    }
+
+    if (elapsed > MAX_HEARTBEAT_GAP) {
+      elapsed = 0;
+    }
+
+    // -----------------------------------------------------
+    // Only credit visible + focused time
+    // -----------------------------------------------------
+
+    const isActive =
+      visible === true &&
+      focused === true;
+
+    const creditedSeconds =
+      isActive ? elapsed : 0;
+
+    const currentValidSeconds =
+      Number(session.valid_seconds || 0);
+
+    const newValidSeconds =
+      Math.min(
+        MIN_STREAM_SECONDS,
+        currentValidSeconds + creditedSeconds
+      );
+
+    const heartbeatCount =
+      Number(session.heartbeat_count || 0) + 1;
+
+    // -----------------------------------------------------
+    // Create attention challenge
+    //
+    // We trigger it after approximately 25 seconds.
+    // -----------------------------------------------------
+
+    let challengeRequired =
+      session.challenge_required;
+
+    let challengeAnswer =
+      session.challenge_answer;
+
+    let challengeQuestion = null;
+
+    if (
+      !challengeRequired &&
+      !session.challenge_passed &&
+      newValidSeconds >= 25
+    ) {
+      const a =
+        Math.floor(Math.random() * 5) + 1;
+
+      const b =
+        Math.floor(Math.random() * 5) + 1;
+
+      challengeQuestion =
+        `What is ${a} + ${b}?`;
+
+      challengeAnswer =
+        String(a + b);
+
+      challengeRequired = true;
+    }
+
+    // -----------------------------------------------------
+    // Store heartbeat
+    // -----------------------------------------------------
+
+    await pool.query(
+      `
+      UPDATE stream_sessions
+      SET
+        valid_seconds = $1,
+        last_heartbeat = NOW(),
+        heartbeat_count = $2,
+        challenge_required = $3,
+        challenge_answer = $4
+      WHERE id = $5
+        AND user_id = $6
+        AND status = 'active'
+      `,
+      [
+        newValidSeconds,
+        heartbeatCount,
+        challengeRequired,
+        challengeAnswer,
+        session_id,
+        req.user.id
+      ]
+    );
+
+    return res.json({
+      message: 'Heartbeat accepted',
+      valid_seconds: newValidSeconds,
+      required_seconds: MIN_STREAM_SECONDS,
+      challenge_required:
+        challengeRequired &&
+        !session.challenge_passed,
+      challenge_question:
+        challengeQuestion
+    });
+
+  } catch (err) {
+    console.error(
+      'Stream heartbeat error:',
+      err
+    );
+
+    return res.status(500).json({
+      message: 'Server error'
+    });
+  }
+};
+
+
+// =========================================================
+// SUBMIT ATTENTION CHALLENGE
+// =========================================================
+
+const submitStreamChallenge = async (
+  req,
+  res
+) => {
+  const {
+    session_id,
+    answer
+  } = req.body;
+
+  try {
+    if (!session_id) {
+      return res.status(400).json({
+        message: 'Session ID is required'
+      });
+    }
+
+    if (
+      answer === undefined ||
+      answer === null
+    ) {
+      return res.status(400).json({
+        message: 'Answer is required'
+      });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT
+        id,
+        challenge_required,
+        challenge_passed,
+        challenge_answer,
+        status
+      FROM stream_sessions
+      WHERE id = $1
+        AND user_id = $2
+      `,
+      [
+        session_id,
+        req.user.id
+      ]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        message: 'Stream session not found'
+      });
+    }
+
+    const session = result.rows[0];
+
+    if (session.status !== 'active') {
+      return res.status(400).json({
+        message: 'Stream session is no longer active'
+      });
+    }
+
+    if (session.challenge_passed) {
+      return res.json({
+        message: 'Challenge already completed',
+        passed: true
+      });
+    }
+
+    if (!session.challenge_required) {
+      return res.status(400).json({
+        message: 'No challenge is currently required'
+      });
+    }
+
+    const correct =
+      String(answer).trim() ===
+      String(session.challenge_answer).trim();
+
+    if (!correct) {
+      return res.status(400).json({
+        message: 'Incorrect answer',
+        passed: false
+      });
+    }
+
+    await pool.query(
+      `
+      UPDATE stream_sessions
+      SET
+        challenge_passed = TRUE,
+        challenge_required = FALSE,
+        challenge_answer = NULL
+      WHERE id = $1
+        AND user_id = $2
+        AND status = 'active'
+      `,
+      [
+        session_id,
+        req.user.id
+      ]
+    );
+
+    return res.json({
+      message: 'Challenge passed',
+      passed: true
+    });
+
+  } catch (err) {
+    console.error(
+      'Stream challenge error:',
+      err
+    );
+
+    return res.status(500).json({
+      message: 'Server error'
     });
   }
 };
@@ -190,6 +514,8 @@ const startStream = async (req, res) => {
 const endStream = async (req, res) => {
   const { session_id } = req.body;
 
+  const client = await pool.connect();
+
   try {
     if (!session_id) {
       return res.status(400).json({
@@ -197,16 +523,19 @@ const endStream = async (req, res) => {
       });
     }
 
+    await client.query('BEGIN');
+
     // -----------------------------------------------------
-    // Get session
+    // Lock session
     // -----------------------------------------------------
 
-    const sessionResult = await pool.query(
+    const sessionResult = await client.query(
       `
       SELECT *
       FROM stream_sessions
       WHERE id = $1
         AND user_id = $2
+      FOR UPDATE
       `,
       [
         session_id,
@@ -215,6 +544,8 @@ const endStream = async (req, res) => {
     );
 
     if (sessionResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+
       return res.status(404).json({
         message: 'Session not found'
       });
@@ -223,34 +554,30 @@ const endStream = async (req, res) => {
     const session = sessionResult.rows[0];
 
     if (session.status !== 'active') {
+      await client.query('ROLLBACK');
+
       return res.status(400).json({
         message: 'Session already ended'
       });
     }
 
     // -----------------------------------------------------
-    // Calculate duration
+    // IMPORTANT:
+    //
+    // Do NOT use Date.now() - start_time.
+    //
+    // The backend now relies on valid_seconds.
     // -----------------------------------------------------
 
-    const startTime = new Date(
-      session.start_time
-    );
-
-    const durationSeconds = Math.floor(
-      (Date.now() - startTime.getTime()) / 1000
-    );
-
-    const trackId = session.track_id;
+    const durationSeconds =
+      Number(session.valid_seconds || 0);
 
     // -----------------------------------------------------
-    // Minimum stream duration
+    // Require attention challenge
     // -----------------------------------------------------
 
-    if (
-      durationSeconds <
-      MIN_STREAM_SECONDS
-    ) {
-      await pool.query(
+    if (!session.challenge_passed) {
+      await client.query(
         `
         UPDATE stream_sessions
         SET
@@ -266,9 +593,11 @@ const endStream = async (req, res) => {
         ]
       );
 
+      await client.query('COMMIT');
+
       return res.status(400).json({
         message:
-          'Stream too short — minimum 60 seconds required',
+          'Please complete the listening verification before ending the stream.',
         streamed_seconds:
           durationSeconds,
         required_seconds:
@@ -277,29 +606,70 @@ const endStream = async (req, res) => {
     }
 
     // -----------------------------------------------------
+    // Minimum valid duration
+    // -----------------------------------------------------
+
+    if (
+      durationSeconds <
+      MIN_STREAM_SECONDS
+    ) {
+      await client.query(
+        `
+        UPDATE stream_sessions
+        SET
+          status = 'failed',
+          end_time = NOW(),
+          duration_seconds = $1,
+          coins_earned = 0
+        WHERE id = $2
+        `,
+        [
+          durationSeconds,
+          session_id
+        ]
+      );
+
+      await client.query('COMMIT');
+
+      return res.status(400).json({
+        message:
+          'Stream too short — minimum 60 seconds of verified engagement required',
+        streamed_seconds:
+          durationSeconds,
+        required_seconds:
+          MIN_STREAM_SECONDS
+      });
+    }
+
+    const trackId =
+      session.track_id;
+
+    // -----------------------------------------------------
     // Get track reward
     // -----------------------------------------------------
 
     let coinsToAward = 30;
 
     if (trackId) {
-      const trackResult = await pool.query(
-        `
-        SELECT campaign_coins
-        FROM tracks
-        WHERE id = $1
-        `,
-        [trackId]
-      );
+      const trackResult =
+        await client.query(
+          `
+          SELECT campaign_coins
+          FROM tracks
+          WHERE id = $1
+          `,
+          [trackId]
+        );
 
       if (
         trackResult.rows.length > 0 &&
         trackResult.rows[0].campaign_coins !== null
       ) {
-        coinsToAward = parseInt(
-          trackResult.rows[0].campaign_coins,
-          10
-        );
+        coinsToAward =
+          parseInt(
+            trackResult.rows[0].campaign_coins,
+            10
+          );
       }
     }
 
@@ -314,32 +684,34 @@ const endStream = async (req, res) => {
     // Calculate today's stream earnings
     // -----------------------------------------------------
 
-    const earnedResult = await pool.query(
-      `
-      SELECT COALESCE(
-        SUM(amount),
-        0
-      ) AS total
-      FROM transactions
-      WHERE user_id = $1
-        AND type = 'stream_earn'
-        AND status = 'completed'
-        AND created_at >= CURRENT_DATE
-      `,
-      [req.user.id]
-    );
+    const earnedResult =
+      await client.query(
+        `
+        SELECT COALESCE(
+          SUM(amount),
+          0
+        ) AS total
+        FROM transactions
+        WHERE user_id = $1
+          AND type = 'stream_earn'
+          AND status = 'completed'
+          AND created_at >= CURRENT_DATE
+        `,
+        [req.user.id]
+      );
 
-    const todayTotal = parseInt(
-      earnedResult.rows[0]?.total || 0,
-      10
-    );
+    const todayTotal =
+      parseInt(
+        earnedResult.rows[0]?.total || 0,
+        10
+      );
 
     // -----------------------------------------------------
     // Daily cap
     // -----------------------------------------------------
 
     if (todayTotal >= DAILY_CAP) {
-      await pool.query(
+      await client.query(
         `
         UPDATE stream_sessions
         SET
@@ -355,26 +727,31 @@ const endStream = async (req, res) => {
         ]
       );
 
+      await client.query('COMMIT');
+
       return res.json({
         message:
           'Daily earning limit reached. Come back tomorrow!',
         coins_earned: 0,
         daily_cap_reached: true,
-        coins_earned_today: todayTotal,
-        daily_cap: DAILY_CAP
+        coins_earned_today:
+          todayTotal,
+        daily_cap:
+          DAILY_CAP
       });
     }
 
-    const actualCoins = Math.min(
-      coinsToAward,
-      DAILY_CAP - todayTotal
-    );
+    const actualCoins =
+      Math.min(
+        coinsToAward,
+        DAILY_CAP - todayTotal
+      );
 
     // -----------------------------------------------------
     // Complete session
     // -----------------------------------------------------
 
-    await pool.query(
+    await client.query(
       `
       UPDATE stream_sessions
       SET
@@ -383,6 +760,7 @@ const endStream = async (req, res) => {
         duration_seconds = $1,
         coins_earned = $2
       WHERE id = $3
+        AND status = 'active'
       `,
       [
         durationSeconds,
@@ -396,7 +774,7 @@ const endStream = async (req, res) => {
     // -----------------------------------------------------
 
     if (trackId) {
-      await pool.query(
+      await client.query(
         `
         UPDATE tracks
         SET total_streams =
@@ -407,7 +785,7 @@ const endStream = async (req, res) => {
       );
 
       const trackData =
-        await pool.query(
+        await client.query(
           `
           SELECT
             total_streams,
@@ -427,7 +805,7 @@ const endStream = async (req, res) => {
         updatedTrack.total_streams >=
           updatedTrack.target_streams
       ) {
-        await pool.query(
+        await client.query(
           `
           UPDATE tracks
           SET is_active = false
@@ -439,10 +817,10 @@ const endStream = async (req, res) => {
     }
 
     // -----------------------------------------------------
-    // Credit user wallet
+    // Credit wallet
     // -----------------------------------------------------
 
-    await pool.query(
+    await client.query(
       `
       UPDATE users
       SET coin_balance =
@@ -459,7 +837,7 @@ const endStream = async (req, res) => {
     // Record transaction
     // -----------------------------------------------------
 
-    await pool.query(
+    await client.query(
       `
       INSERT INTO transactions
       (
@@ -493,7 +871,7 @@ const endStream = async (req, res) => {
     // -----------------------------------------------------
 
     const balanceResult =
-      await pool.query(
+      await client.query(
         `
         SELECT coin_balance
         FROM users
@@ -505,6 +883,8 @@ const endStream = async (req, res) => {
     const newBalance =
       balanceResult.rows[0]
         ?.coin_balance || 0;
+
+    await client.query('COMMIT');
 
     // -----------------------------------------------------
     // Response
@@ -528,15 +908,26 @@ const endStream = async (req, res) => {
     });
 
   } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch (rollbackError) {
+      console.error(
+        'Rollback error:',
+        rollbackError
+      );
+    }
+
     console.error(
       'End stream error:',
       err
     );
 
     return res.status(500).json({
-      message: 'Server error',
-      error: err.message
+      message: 'Server error'
     });
+
+  } finally {
+    client.release();
   }
 };
 
@@ -578,8 +969,7 @@ const getStreamHistory = async (
     );
 
     return res.status(500).json({
-      message: 'Server error',
-      error: err.message
+      message: 'Server error'
     });
   }
 };
@@ -591,6 +981,8 @@ const getStreamHistory = async (
 
 module.exports = {
   startStream,
+  heartbeatStream,
+  submitStreamChallenge,
   endStream,
   getStreamHistory
 };
