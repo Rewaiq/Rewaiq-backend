@@ -1,25 +1,23 @@
 const express = require('express');
 
-const router = express.Router();
+const router =
+  express.Router();
 
 const {
   startStream,
   heartbeatStream,
   endStream,
-  getStreamHistory
+  getStreamHistory,
 } = require('../controllers/streamController');
 
 const {
-  protect
+  protect,
 } = require('../middleware/auth');
 
 
-// =========================================================
-// STREAM ROUTES
-// =========================================================
-
-
-// Start streaming session
+/*
+ * Start streaming
+ */
 router.post(
   '/start',
   protect,
@@ -27,7 +25,9 @@ router.post(
 );
 
 
-// Streaming heartbeat
+/*
+ * Verified heartbeat
+ */
 router.post(
   '/heartbeat',
   protect,
@@ -35,7 +35,9 @@ router.post(
 );
 
 
-// End streaming session
+/*
+ * Complete/end stream
+ */
 router.post(
   '/end',
   protect,
@@ -43,7 +45,9 @@ router.post(
 );
 
 
-// Stream history
+/*
+ * Stream history
+ */
 router.get(
   '/history',
   protect,
@@ -51,4 +55,5 @@ router.get(
 );
 
 
-module.exports = router;
+module.exports =
+  router;
