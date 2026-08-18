@@ -7,17 +7,23 @@ const {
   startStream,
   heartbeatStream,
   endStream,
-  getStreamHistory,
+  getStreamHistory
 } = require('../controllers/streamController');
 
 const {
-  protect,
+  protect
 } = require('../middleware/auth');
 
 
-/*
- * Start streaming
- */
+// ============================================================
+// STREAM ROUTES
+// ============================================================
+
+
+// ------------------------------------------------------------
+// Start stream
+// ------------------------------------------------------------
+
 router.post(
   '/start',
   protect,
@@ -25,9 +31,10 @@ router.post(
 );
 
 
-/*
- * Verified heartbeat
- */
+// ------------------------------------------------------------
+// Heartbeat
+// ------------------------------------------------------------
+
 router.post(
   '/heartbeat',
   protect,
@@ -35,9 +42,10 @@ router.post(
 );
 
 
-/*
- * Complete/end stream
- */
+// ------------------------------------------------------------
+// End stream
+// ------------------------------------------------------------
+
 router.post(
   '/end',
   protect,
@@ -45,9 +53,10 @@ router.post(
 );
 
 
-/*
- * Stream history
- */
+// ------------------------------------------------------------
+// History
+// ------------------------------------------------------------
+
 router.get(
   '/history',
   protect,
@@ -55,5 +64,4 @@ router.get(
 );
 
 
-module.exports =
-  router;
+module.exports = router;
