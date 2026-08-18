@@ -6,7 +6,6 @@ const {
   startStream,
   heartbeatStream,
   endStream,
-  submitStreamChallenge,
   getStreamHistory
 } = require('../controllers/streamController');
 
@@ -14,9 +13,11 @@ const {
   protect
 } = require('../middleware/auth');
 
+
 // =========================================================
 // STREAM ROUTES
 // =========================================================
+
 
 // Start streaming session
 router.post(
@@ -25,19 +26,14 @@ router.post(
   startStream
 );
 
-// Stream heartbeat
+
+// Streaming heartbeat
 router.post(
   '/heartbeat',
   protect,
   heartbeatStream
 );
 
-// Attention challenge
-router.post(
-  '/challenge',
-  protect,
-  submitStreamChallenge
-);
 
 // End streaming session
 router.post(
@@ -46,11 +42,13 @@ router.post(
   endStream
 );
 
+
 // Stream history
 router.get(
   '/history',
   protect,
   getStreamHistory
 );
+
 
 module.exports = router;
