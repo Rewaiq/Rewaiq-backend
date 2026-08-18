@@ -1,42 +1,28 @@
 const pool = require('../config/db');
 
 const REQUIRED_SECONDS = 60;
-
 const DAILY_CAP = 500;
 
-/*
- * Expected heartbeat every 5 seconds.
- *
- * We allow up to 15 seconds between
- * heartbeats because mobile networks can
- * occasionally be slow.
- */
+// Expected heartbeat roughly every 5 seconds.
 const HEARTBEAT_INTERVAL = 5;
 
-const HEARTBEAT_MAX_GAP = 15;
+// Maximum gap we are willing to credit.
+const HEARTBEAT_TOLERANCE = 10;
 
-/*
- * Challenge appears between 20 and 40
- * verified/elapsed seconds.
- */
+// Challenge appears between 20 and 40 seconds.
 const CHALLENGE_MIN_SECONDS = 20;
-
 const CHALLENGE_MAX_SECONDS = 40;
 
-/*
- * Active sessions older than 10 minutes
- * are automatically failed.
- */
+// Sessions older than this are considered stale.
 const STALE_SESSION_MINUTES = 10;
 
 
-/* ========================================================
-   CHALLENGE
-======================================================== */
+// ============================================================
+// HELPER
+// ============================================================
 
 function getChallengeDueSecond(sessionId) {
-  const numericId =
-    Number(sessionId) || 1;
+  const numericId = Number(sessionId) || 1;
 
   const range =
     CHALLENGE_MAX_SECONDS -
@@ -50,85 +36,69 @@ function getChallengeDueSecond(sessionId) {
 }
 
 
-/* ========================================================
-   START STREAM
-======================================================== */
+// ============================================================
+// START STREAM
+// ============================================================
 
-const startStream = async (
-  req,
-  res
-) => {
+const startStream = async (req, res) => {
   const {
     track_id,
-    track_url,
+    track_url
   } = req.body;
 
   try {
-    const userId =
-      req.user.id;
+    const userId = req.user.id;
 
     if (!track_id) {
       return res.status(400).json({
-        message:
-          'Track ID is required',
+        message: 'Track ID is required'
       });
     }
 
-    /*
-     * ----------------------------------------------------
-     * Verify track
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Verify track
+    // --------------------------------------------------------
 
-    const trackResult =
-      await pool.query(
-        `
-        SELECT
-          id,
-          title,
-          campaign_coins,
-          target_streams,
-          total_streams,
-          is_active
-        FROM tracks
-        WHERE id = $1
-        `,
-        [track_id]
-      );
+    const trackResult = await pool.query(
+      `
+      SELECT
+        id,
+        title,
+        campaign_coins,
+        target_streams,
+        total_streams,
+        is_active
+      FROM tracks
+      WHERE id = $1
+      `,
+      [track_id]
+    );
 
-    if (
-      trackResult.rows.length === 0
-    ) {
+    if (trackResult.rows.length === 0) {
       return res.status(404).json({
-        message:
-          'Track not found',
+        message: 'Track not found'
       });
     }
 
-    const track =
-      trackResult.rows[0];
+    const track = trackResult.rows[0];
 
     if (!track.is_active) {
       return res.status(400).json({
         message:
-          'This track is no longer available for streaming',
+          'This track is no longer available for streaming'
       });
     }
 
-    /*
-     * ----------------------------------------------------
-     * Clean stale sessions
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Clean stale active sessions
+    // --------------------------------------------------------
 
     await pool.query(
       `
       UPDATE stream_sessions
       SET
         status = 'failed',
-
         end_time = NOW(),
-
         duration_seconds =
           GREATEST(
             0,
@@ -137,13 +107,9 @@ const startStream = async (
               (NOW() - start_time)
             )::integer
           ),
-
         coins_earned = 0
-      WHERE
-        user_id = $1
-
+      WHERE user_id = $1
         AND status = 'active'
-
         AND start_time <
           NOW() -
           INTERVAL '${STALE_SESSION_MINUTES} minutes'
@@ -151,98 +117,76 @@ const startStream = async (
       [userId]
     );
 
-    /*
-     * ----------------------------------------------------
-     * Only one active session
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Prevent multiple active sessions
+    // --------------------------------------------------------
 
-    const existing =
-      await pool.query(
-        `
-        SELECT
-          id,
-          track_id,
-          start_time
-        FROM stream_sessions
-        WHERE
-          user_id = $1
+    const existing = await pool.query(
+      `
+      SELECT
+        id,
+        track_id,
+        start_time
+      FROM stream_sessions
+      WHERE user_id = $1
+        AND status = 'active'
+      ORDER BY start_time DESC
+      LIMIT 1
+      `,
+      [userId]
+    );
 
-          AND status = 'active'
-
-        ORDER BY
-          start_time DESC
-
-        LIMIT 1
-        `,
-        [userId]
-      );
-
-    if (
-      existing.rows.length > 0
-    ) {
+    if (existing.rows.length > 0) {
       return res.status(400).json({
         message:
           'You already have an active stream session',
-
         session_id:
           existing.rows[0].id,
-
         track_id:
-          existing.rows[0].track_id,
+          existing.rows[0].track_id
       });
     }
 
-    /*
-     * ----------------------------------------------------
-     * One rewarded stream per track/day
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // One rewarded stream per track per day
+    // --------------------------------------------------------
 
     const alreadyStreamed =
       await pool.query(
         `
         SELECT id
         FROM stream_sessions
-        WHERE
-          user_id = $1
-
+        WHERE user_id = $1
           AND track_id = $2
-
           AND status = 'completed'
-
           AND start_time >= CURRENT_DATE
-
         LIMIT 1
         `,
         [
           userId,
-          track_id,
+          track_id
         ]
       );
 
-    if (
-      alreadyStreamed.rows.length > 0
-    ) {
+    if (alreadyStreamed.rows.length > 0) {
       return res.status(400).json({
         message:
-          'You have already streamed this track today. Try another track or come back tomorrow.',
+          'You have already streamed this track today. Try another track or come back tomorrow.'
       });
     }
 
-    /*
-     * ----------------------------------------------------
-     * Create session
-     *
-     * IMPORTANT:
-     *
-     * valid_seconds remains 0.
-     *
-     * No heartbeat has started yet.
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Create session
+    //
+    // IMPORTANT:
+    //
+    // valid_seconds starts at 0.
+    //
+    // The session does NOT earn time simply because
+    // the Start button was clicked.
+    // --------------------------------------------------------
 
-    const session =
+    const sessionResult =
       await pool.query(
         `
         INSERT INTO stream_sessions
@@ -282,72 +226,52 @@ const startStream = async (
         [
           userId,
           track_id,
-          track_url || null,
+          track_url || null
         ]
       );
 
-    const createdSession =
-      session.rows[0];
+    const session =
+      sessionResult.rows[0];
 
-    /*
-     * ----------------------------------------------------
-     * Calculate challenge position
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Generate challenge based on REAL session ID
+    // --------------------------------------------------------
 
     const challengeDue =
       getChallengeDueSecond(
-        createdSession.id
+        session.id
       );
 
     await pool.query(
       `
       UPDATE stream_sessions
-      SET
-        challenge_answer = $1
+      SET challenge_answer = $1
       WHERE id = $2
       `,
       [
-        String(
-          challengeDue
-        ),
-
-        createdSession.id,
+        String(challengeDue),
+        session.id
       ]
     );
 
-    /*
-     * ----------------------------------------------------
-     * Return
-     * ----------------------------------------------------
-     */
-
     return res.status(201).json({
+      success: true,
+
       message:
-        'Stream session started',
+        'Stream session created. Start playback to begin verification.',
 
       session: {
-        id:
-          createdSession.id,
+        id: session.id,
+        track_id: session.track_id,
+        start_time: session.start_time,
+        status: session.status,
+        required_seconds: REQUIRED_SECONDS,
 
-        track_id:
-          createdSession.track_id,
+        // Important for frontend onboarding.
+        playback_confirmation_required: true,
 
-        start_time:
-          createdSession.start_time,
-
-        status:
-          createdSession.status,
-
-        required_seconds:
-          REQUIRED_SECONDS,
-
-        challenge_required:
-          true,
-
-        verified_seconds:
-          0,
-      },
+        challenge_required: true
+      }
     });
 
   } catch (err) {
@@ -357,16 +281,15 @@ const startStream = async (
     );
 
     return res.status(500).json({
-      message:
-        'Server error',
+      message: 'Server error'
     });
   }
 };
 
 
-/* ========================================================
-   HEARTBEAT
-======================================================== */
+// ============================================================
+// HEARTBEAT
+// ============================================================
 
 const heartbeatStream = async (
   req,
@@ -376,61 +299,43 @@ const heartbeatStream = async (
     session_id,
     visible,
     focused,
-    challenge_response,
+    challenge_response
   } = req.body;
 
-  const client =
-    await pool.connect();
-
   try {
-    const userId =
-      req.user.id;
+    const userId = req.user.id;
 
     if (!session_id) {
       return res.status(400).json({
         message:
-          'Session ID is required',
+          'Session ID is required'
       });
     }
 
-    await client.query(
-      'BEGIN'
-    );
-
-    /*
-     * ----------------------------------------------------
-     * Lock session
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Get session
+    // --------------------------------------------------------
 
     const sessionResult =
-      await client.query(
+      await pool.query(
         `
         SELECT *
         FROM stream_sessions
-        WHERE
-          id = $1
-
+        WHERE id = $1
           AND user_id = $2
-
-        FOR UPDATE
         `,
         [
           session_id,
-          userId,
+          userId
         ]
       );
 
     if (
       sessionResult.rows.length === 0
     ) {
-      await client.query(
-        'ROLLBACK'
-      );
-
       return res.status(404).json({
         message:
-          'Stream session not found',
+          'Stream session not found'
       });
     }
 
@@ -440,24 +345,18 @@ const heartbeatStream = async (
     if (
       session.status !== 'active'
     ) {
-      await client.query(
-        'ROLLBACK'
-      );
-
       return res.status(400).json({
         message:
-          'This stream session is no longer active',
+          'This stream session is no longer active'
       });
     }
 
-    /*
-     * ----------------------------------------------------
-     * Server time
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Server time
+    // --------------------------------------------------------
 
     const nowResult =
-      await client.query(
+      await pool.query(
         `
         SELECT NOW() AS now
         `
@@ -484,41 +383,22 @@ const heartbeatStream = async (
         )
       );
 
-    /*
-     * ----------------------------------------------------
-     * Browser state
-     * ----------------------------------------------------
-     */
-
-    const pageActive =
-      visible === true &&
-      focused === true;
-
-    /*
-     * ----------------------------------------------------
-     * Challenge
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Challenge
+    // --------------------------------------------------------
 
     const challengeDue =
       parseInt(
-        session.challenge_answer ||
-          '30',
+        session.challenge_answer || '30',
         10
       );
 
     let challengePassed =
-      session.challenge_passed ===
-      true;
+      session.challenge_passed === true;
 
     const challengeIsDue =
       elapsedSeconds >=
       challengeDue;
-
-    /*
-     * Only accept challenge answer
-     * when challenge is actually due.
-     */
 
     if (
       session.challenge_required &&
@@ -526,32 +406,57 @@ const heartbeatStream = async (
       challengeIsDue &&
       challenge_response === true
     ) {
-      challengePassed =
-        true;
+      challengePassed = true;
 
-      await client.query(
+      await pool.query(
         `
         UPDATE stream_sessions
-        SET
-          challenge_passed = TRUE
+        SET challenge_passed = TRUE
         WHERE id = $1
         `,
         [session_id]
       );
     }
 
-    /*
-     * ----------------------------------------------------
-     * Calculate verified seconds
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Determine whether page is genuinely active
+    // --------------------------------------------------------
+
+    const isActive =
+      visible === true &&
+      focused === true;
 
     let addedSeconds = 0;
 
-    if (pageActive) {
-      if (
-        session.last_heartbeat
-      ) {
+    if (isActive) {
+
+      // ------------------------------------------------------
+      // First heartbeat
+      // ------------------------------------------------------
+
+      if (!session.last_heartbeat) {
+
+        /*
+         * IMPORTANT:
+         *
+         * We don't credit the entire time between
+         * session creation and first heartbeat.
+         *
+         * We only credit one normal heartbeat interval.
+         */
+
+        addedSeconds =
+          Math.min(
+            HEARTBEAT_INTERVAL,
+            elapsedSeconds
+          );
+
+      } else {
+
+        // ----------------------------------------------------
+        // Existing heartbeat
+        // ----------------------------------------------------
+
         const lastHeartbeat =
           new Date(
             session.last_heartbeat
@@ -566,72 +471,57 @@ const heartbeatStream = async (
           );
 
         /*
-         * Credit only reasonable
-         * heartbeat gaps.
+         * Normal:
+         *
+         * 5 sec = credit
+         * 7 sec = credit
+         * 10 sec = credit
+         *
+         * Huge gap:
+         *
+         * 30 sec = don't credit
          */
 
         if (
           gapSeconds > 0 &&
           gapSeconds <=
-            HEARTBEAT_MAX_GAP
+            HEARTBEAT_INTERVAL +
+            HEARTBEAT_TOLERANCE
         ) {
           addedSeconds =
-            gapSeconds;
+            Math.min(
+              gapSeconds,
+              HEARTBEAT_INTERVAL +
+                HEARTBEAT_TOLERANCE
+            );
         }
-      } else {
-        /*
-         * First heartbeat.
-         *
-         * Do NOT credit the entire time
-         * since session creation.
-         *
-         * Only give a small initial
-         * verification window.
-         */
-
-        addedSeconds =
-          Math.min(
-            HEARTBEAT_INTERVAL,
-            elapsedSeconds
-          );
       }
     }
 
-    /*
-     * ----------------------------------------------------
-     * Never exceed:
-     *
-     * 1. Required seconds
-     * 2. Actual server elapsed time
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Calculate new verified time
+    // --------------------------------------------------------
 
     const currentValidSeconds =
       Number(
-        session.valid_seconds ||
-          0
+        session.valid_seconds || 0
       );
 
-    const maximumByElapsed =
+    let newValidSeconds =
+      currentValidSeconds +
+      addedSeconds;
+
+    newValidSeconds =
       Math.min(
         REQUIRED_SECONDS,
-        elapsedSeconds
+        newValidSeconds
       );
 
-    const newValidSeconds =
-      Math.min(
-        maximumByElapsed,
-        currentValidSeconds +
-          addedSeconds
-      );
+    // --------------------------------------------------------
+    // Save heartbeat
+    // --------------------------------------------------------
 
-    /*
-     * ----------------------------------------------------
-     * Record heartbeat
-     * ----------------------------------------------------
-     */
-
-    await client.query(
+    await pool.query(
       `
       INSERT INTO stream_heartbeats
       (
@@ -653,29 +543,21 @@ const heartbeatStream = async (
       [
         session_id,
         userId,
-        Boolean(
-          visible
-        ),
-        Boolean(
-          focused
-        ),
+        Boolean(visible),
+        Boolean(focused)
       ]
     );
 
-    /*
-     * ----------------------------------------------------
-     * Update session
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Update session
+    // --------------------------------------------------------
 
-    await client.query(
+    await pool.query(
       `
       UPDATE stream_sessions
       SET
         valid_seconds = $1,
-
         last_heartbeat = NOW(),
-
         heartbeat_count =
           COALESCE(
             heartbeat_count,
@@ -685,31 +567,18 @@ const heartbeatStream = async (
       `,
       [
         newValidSeconds,
-        session_id,
+        session_id
       ]
     );
 
-    await client.query(
-      'COMMIT'
-    );
-
-    /*
-     * ----------------------------------------------------
-     * Challenge status
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Challenge state
+    // --------------------------------------------------------
 
     const challengeRequiredNow =
       session.challenge_required &&
       !challengePassed &&
-      elapsedSeconds >=
-        challengeDue;
-
-    /*
-     * ----------------------------------------------------
-     * Complete?
-     * ----------------------------------------------------
-     */
+      challengeIsDue;
 
     const complete =
       newValidSeconds >=
@@ -717,8 +586,7 @@ const heartbeatStream = async (
       challengePassed;
 
     return res.json({
-      success:
-        true,
+      success: true,
 
       valid_seconds:
         newValidSeconds,
@@ -726,8 +594,12 @@ const heartbeatStream = async (
       required_seconds:
         REQUIRED_SECONDS,
 
-      elapsed_seconds:
-        elapsedSeconds,
+      seconds_remaining:
+        Math.max(
+          REQUIRED_SECONDS -
+            newValidSeconds,
+          0
+        ),
 
       challenge_required:
         Boolean(
@@ -737,17 +609,18 @@ const heartbeatStream = async (
       challenge_passed:
         challengePassed,
 
-      complete:
-        complete,
+      complete,
+
+      verified:
+        isActive,
+
+      heartbeat_count:
+        Number(
+          session.heartbeat_count || 0
+        ) + 1
     });
 
   } catch (err) {
-    try {
-      await client.query(
-        'ROLLBACK'
-      );
-    } catch (_) {}
-
     console.error(
       'Heartbeat error:',
       err
@@ -755,35 +628,34 @@ const heartbeatStream = async (
 
     return res.status(500).json({
       message:
-        'Server error',
+        'Server error'
     });
-
-  } finally {
-    client.release();
   }
 };
 
 
-/* ========================================================
-   END STREAM
-======================================================== */
+// ============================================================
+// END STREAM
+// ============================================================
 
 const endStream = async (
   req,
   res
 ) => {
+
   const {
-    session_id,
+    session_id
   } = req.body;
 
   const client =
     await pool.connect();
 
   try {
+
     if (!session_id) {
       return res.status(400).json({
         message:
-          'Session ID is required',
+          'Session ID is required'
       });
     }
 
@@ -791,33 +663,27 @@ const endStream = async (
       'BEGIN'
     );
 
-    /*
-     * ----------------------------------------------------
-     * Lock session
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Lock session
+    // --------------------------------------------------------
 
     const sessionResult =
       await client.query(
         `
         SELECT *
         FROM stream_sessions
-        WHERE
-          id = $1
-
+        WHERE id = $1
           AND user_id = $2
-
         FOR UPDATE
         `,
         [
           session_id,
-          req.user.id,
+          req.user.id
         ]
       );
 
     if (
-      sessionResult.rows.length ===
-      0
+      sessionResult.rows.length === 0
     ) {
       await client.query(
         'ROLLBACK'
@@ -825,7 +691,7 @@ const endStream = async (
 
       return res.status(404).json({
         message:
-          'Session not found',
+          'Session not found'
       });
     }
 
@@ -833,8 +699,7 @@ const endStream = async (
       sessionResult.rows[0];
 
     if (
-      session.status !==
-      'active'
+      session.status !== 'active'
     ) {
       await client.query(
         'ROLLBACK'
@@ -842,52 +707,43 @@ const endStream = async (
 
       return res.status(400).json({
         message:
-          'Session already ended',
+          'Session already ended'
       });
     }
 
-    /*
-     * ----------------------------------------------------
-     * Verified time
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Verified time
+    // --------------------------------------------------------
 
     const validSeconds =
       Number(
-        session.valid_seconds ||
-          0
+        session.valid_seconds || 0
       );
 
-    /*
-     * ----------------------------------------------------
-     * Challenge
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Challenge
+    // --------------------------------------------------------
 
     const challengePassed =
       session.challenge_required
-        ? session.challenge_passed ===
-          true
+        ? session.challenge_passed === true
         : true;
 
-    /*
-     * ----------------------------------------------------
-     * Insufficient verified time
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Insufficient verified time
+    // --------------------------------------------------------
 
     if (
       validSeconds <
       REQUIRED_SECONDS
     ) {
+
       await client.query(
         `
         UPDATE stream_sessions
         SET
           status = 'failed',
-
           end_time = NOW(),
-
           duration_seconds =
             GREATEST(
               0,
@@ -896,7 +752,6 @@ const endStream = async (
                 (NOW() - start_time)
               )::integer
             ),
-
           coins_earned = 0
         WHERE id = $1
         `,
@@ -916,24 +771,23 @@ const endStream = async (
 
         required_seconds:
           REQUIRED_SECONDS,
+
+        coins_earned: 0
       });
     }
 
-    /*
-     * ----------------------------------------------------
-     * Challenge not passed
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Challenge not passed
+    // --------------------------------------------------------
 
     if (!challengePassed) {
+
       await client.query(
         `
         UPDATE stream_sessions
         SET
           status = 'failed',
-
           end_time = NOW(),
-
           duration_seconds =
             GREATEST(
               0,
@@ -942,7 +796,6 @@ const endStream = async (
                 (NOW() - start_time)
               )::integer
             ),
-
           coins_earned = 0
         WHERE id = $1
         `,
@@ -955,24 +808,21 @@ const endStream = async (
 
       return res.status(400).json({
         message:
-          'Please complete the listening verification.',
+          'Please confirm that you are still listening before completing the stream.',
 
         challenge_required:
           true,
 
         coins_earned:
-          0,
+          0
       });
     }
 
-    /*
-     * ----------------------------------------------------
-     * Get reward
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Get reward
+    // --------------------------------------------------------
 
-    let coinsToAward =
-      30;
+    let coinsToAward = 30;
 
     const trackResult =
       await client.query(
@@ -989,15 +839,14 @@ const endStream = async (
       );
 
     if (
-      trackResult.rows.length >
-      0
+      trackResult.rows.length > 0
     ) {
+
       const track =
         trackResult.rows[0];
 
       if (
-        track.campaign_coins !==
-        null
+        track.campaign_coins !== null
       ) {
         coinsToAward =
           parseInt(
@@ -1013,15 +862,12 @@ const endStream = async (
       ) ||
       coinsToAward < 0
     ) {
-      coinsToAward =
-        30;
+      coinsToAward = 30;
     }
 
-    /*
-     * ----------------------------------------------------
-     * Daily earnings
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Daily earnings
+    // --------------------------------------------------------
 
     const earnedResult =
       await client.query(
@@ -1032,58 +878,41 @@ const endStream = async (
             0
           ) AS total
         FROM transactions
-        WHERE
-          user_id = $1
-
-          AND type =
-            'stream_earn'
-
-          AND status =
-            'completed'
-
-          AND created_at >=
-            CURRENT_DATE
+        WHERE user_id = $1
+          AND type = 'stream_earn'
+          AND status = 'completed'
+          AND created_at >= CURRENT_DATE
         `,
         [req.user.id]
       );
 
     const todayTotal =
       parseInt(
-        earnedResult.rows[0]
-          ?.total || 0,
+        earnedResult.rows[0]?.total || 0,
         10
       );
 
-    /*
-     * ----------------------------------------------------
-     * Daily cap
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Daily cap
+    // --------------------------------------------------------
 
     if (
-      todayTotal >=
-      DAILY_CAP
+      todayTotal >= DAILY_CAP
     ) {
+
       await client.query(
         `
         UPDATE stream_sessions
         SET
-          status =
-            'completed',
-
-          end_time =
-            NOW(),
-
-          duration_seconds =
-            $1,
-
-          coins_earned =
-            0
+          status = 'completed',
+          end_time = NOW(),
+          duration_seconds = $1,
+          coins_earned = 0
         WHERE id = $2
         `,
         [
           validSeconds,
-          session_id,
+          session_id
         ]
       );
 
@@ -1095,8 +924,7 @@ const endStream = async (
         message:
           'Daily earning limit reached. Come back tomorrow!',
 
-        coins_earned:
-          0,
+        coins_earned: 0,
 
         daily_cap_reached:
           true,
@@ -1105,10 +933,7 @@ const endStream = async (
           todayTotal,
 
         daily_cap:
-          DAILY_CAP,
-
-        verified_seconds:
-          validSeconds,
+          DAILY_CAP
       });
     }
 
@@ -1119,45 +944,33 @@ const endStream = async (
           todayTotal
       );
 
-    /*
-     * ----------------------------------------------------
-     * Complete session
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Complete session
+    // --------------------------------------------------------
 
     await client.query(
       `
       UPDATE stream_sessions
       SET
-        status =
-          'completed',
-
-        end_time =
-          NOW(),
-
-        duration_seconds =
-          $1,
-
-        coins_earned =
-          $2
+        status = 'completed',
+        end_time = NOW(),
+        duration_seconds = $1,
+        coins_earned = $2
       WHERE id = $3
       `,
       [
         validSeconds,
         actualCoins,
-        session_id,
+        session_id
       ]
     );
 
-    /*
-     * ----------------------------------------------------
-     * Increment track streams
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Increment track streams
+    // --------------------------------------------------------
 
-    if (
-      session.track_id
-    ) {
+    if (session.track_id) {
+
       const updatedTrackResult =
         await client.query(
           `
@@ -1169,7 +982,6 @@ const endStream = async (
                 0
               ) + 1
           WHERE id = $1
-
           RETURNING
             total_streams,
             target_streams
@@ -1178,8 +990,7 @@ const endStream = async (
         );
 
       const updatedTrack =
-        updatedTrackResult
-          .rows[0];
+        updatedTrackResult.rows[0];
 
       if (
         updatedTrack &&
@@ -1187,12 +998,11 @@ const endStream = async (
         updatedTrack.total_streams >=
           updatedTrack.target_streams
       ) {
+
         await client.query(
           `
           UPDATE tracks
-          SET
-            is_active =
-              false
+          SET is_active = false
           WHERE id = $1
           `,
           [session.track_id]
@@ -1200,11 +1010,9 @@ const endStream = async (
       }
     }
 
-    /*
-     * ----------------------------------------------------
-     * Credit wallet
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Credit wallet
+    // --------------------------------------------------------
 
     await client.query(
       `
@@ -1219,15 +1027,13 @@ const endStream = async (
       `,
       [
         actualCoins,
-        req.user.id,
+        req.user.id
       ]
     );
 
-    /*
-     * ----------------------------------------------------
-     * Transaction
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Transaction
+    // --------------------------------------------------------
 
     await client.query(
       `
@@ -1262,33 +1068,19 @@ const endStream = async (
             validSeconds,
 
           verification:
-            'heartbeat',
-
-          /*
-           * User confirmed they had
-           * pressed Play.
-           *
-           * This is not represented
-           * as direct Audiomack
-           * playback proof.
-           */
-          playback_confirmation:
-            true,
-        }),
+            'heartbeat'
+        })
       ]
     );
 
-    /*
-     * ----------------------------------------------------
-     * New balance
-     * ----------------------------------------------------
-     */
+    // --------------------------------------------------------
+    // Get new balance
+    // --------------------------------------------------------
 
     const balanceResult =
       await client.query(
         `
-        SELECT
-          coin_balance
+        SELECT coin_balance
         FROM users
         WHERE id = $1
         `,
@@ -1304,6 +1096,8 @@ const endStream = async (
     );
 
     return res.json({
+      success: true,
+
       message:
         `Stream complete! ${actualCoins} coins earned`,
 
@@ -1327,10 +1121,11 @@ const endStream = async (
         DAILY_CAP,
 
       daily_cap_reached:
-        false,
+        false
     });
 
   } catch (err) {
+
     try {
       await client.query(
         'ROLLBACK'
@@ -1344,7 +1139,7 @@ const endStream = async (
 
     return res.status(500).json({
       message:
-        'Server error',
+        'Server error'
     });
 
   } finally {
@@ -1353,33 +1148,29 @@ const endStream = async (
 };
 
 
-/* ========================================================
-   HISTORY
-======================================================== */
+// ============================================================
+// STREAM HISTORY
+// ============================================================
 
 const getStreamHistory = async (
   req,
   res
 ) => {
+
   try {
+
     const sessions =
       await pool.query(
         `
         SELECT
           s.*,
           t.title AS track_title
-
         FROM stream_sessions s
-
         LEFT JOIN tracks t
           ON s.track_id = t.id
-
-        WHERE
-          s.user_id = $1
-
+        WHERE s.user_id = $1
         ORDER BY
           s.start_time DESC
-
         LIMIT 20
         `,
         [req.user.id]
@@ -1387,10 +1178,11 @@ const getStreamHistory = async (
 
     return res.json({
       sessions:
-        sessions.rows,
+        sessions.rows
     });
 
   } catch (err) {
+
     console.error(
       'Get stream history error:',
       err
@@ -1398,19 +1190,19 @@ const getStreamHistory = async (
 
     return res.status(500).json({
       message:
-        'Server error',
+        'Server error'
     });
   }
 };
 
 
-/* ========================================================
-   EXPORTS
-======================================================== */
+// ============================================================
+// EXPORTS
+// ============================================================
 
 module.exports = {
   startStream,
   heartbeatStream,
   endStream,
-  getStreamHistory,
+  getStreamHistory
 };
