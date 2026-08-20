@@ -18,7 +18,6 @@ const {
 // STREAM ROUTES
 // =========================================================
 
-
 // Start a streaming session
 router.post(
   '/start',
