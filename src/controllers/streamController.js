@@ -3,17 +3,17 @@ const pool = require('../config/db');
 const REQUIRED_SECONDS = 60;
 const DAILY_CAP = 500;
 
-// Heartbeats are normally sent every 5 seconds.
+// Frontend sends heartbeat every 5 seconds.
 const HEARTBEAT_INTERVAL = 5;
 
-// We allow some network delay.
+// Allow reasonable network delay.
 const HEARTBEAT_TOLERANCE = 10;
 
-// Challenge appears between 20 and 40 verified seconds.
+// Challenge appears between these verified seconds.
 const CHALLENGE_MIN_SECONDS = 20;
 const CHALLENGE_MAX_SECONDS = 40;
 
-// Automatically fail sessions older than 10 minutes.
+// Sessions older than this are automatically failed.
 const STALE_SESSION_MINUTES = 10;
 
 
@@ -55,9 +55,9 @@ const startStream = async (req, res) => {
       });
     }
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Confirm track exists
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     const trackResult = await pool.query(
       `
@@ -89,9 +89,9 @@ const startStream = async (req, res) => {
       });
     }
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Clean stale sessions
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     await pool.query(
       `
@@ -115,9 +115,9 @@ const startStream = async (req, res) => {
       [userId]
     );
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Prevent multiple active sessions
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     const existing = await pool.query(
       `
@@ -138,16 +138,18 @@ const startStream = async (req, res) => {
       return res.status(400).json({
         message:
           'You already have an active stream session',
+
         session_id:
           existing.rows[0].id,
+
         track_id:
           existing.rows[0].track_id
       });
     }
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // One rewarded stream per track per day
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     const alreadyStreamed =
       await pool.query(
@@ -173,16 +175,9 @@ const startStream = async (req, res) => {
       });
     }
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Create session
-    //
-    // IMPORTANT:
-    // valid_seconds starts at 0.
-    //
-    // We also intentionally leave last_heartbeat NULL.
-    // The FIRST heartbeat only establishes the verification
-    // clock. It does NOT award time.
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     const session =
       await pool.query(
@@ -231,9 +226,9 @@ const startStream = async (req, res) => {
     const createdSession =
       session.rows[0];
 
-    // -----------------------------------------------------
-    // Generate challenge timing based on actual session ID
-    // -----------------------------------------------------
+    // -------------------------------------------------------
+    // Generate challenge timing
+    // -------------------------------------------------------
 
     const challengeDue =
       getChallengeDueSecond(
@@ -327,9 +322,9 @@ const heartbeatStream = async (
       'BEGIN'
     );
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Lock session
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     const sessionResult =
       await client.query(
@@ -375,9 +370,9 @@ const heartbeatStream = async (
       });
     }
 
-    // -----------------------------------------------------
-    // Get server time
-    // -----------------------------------------------------
+    // -------------------------------------------------------
+    // Server time
+    // -------------------------------------------------------
 
     const nowResult =
       await client.query(
@@ -389,9 +384,9 @@ const heartbeatStream = async (
         nowResult.rows[0].now
       );
 
-    // -----------------------------------------------------
-    // Playback must have been confirmed
-    // -----------------------------------------------------
+    // -------------------------------------------------------
+    // Playback confirmation
+    // -------------------------------------------------------
 
     if (
       playback_started !== true
@@ -403,35 +398,37 @@ const heartbeatStream = async (
       return res.status(400).json({
         message:
           'Playback has not been confirmed.',
+
         playback_required:
           true
       });
     }
 
-    // -----------------------------------------------------
-    // Visibility/focus verification
-    // -----------------------------------------------------
+    // -------------------------------------------------------
+    // Page visibility/focus
+    // -------------------------------------------------------
 
     const isActive =
       visible === true &&
       focused === true;
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
+    // Existing verified seconds
+    // -------------------------------------------------------
+
+    const currentValidSeconds =
+      Number(
+        session.valid_seconds || 0
+      );
+
+    // -------------------------------------------------------
     // Challenge
-    //
-    // challenge_answer stores the second at which the
-    // challenge should become available.
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     const challengeDue =
       parseInt(
         session.challenge_answer || '30',
         10
-      );
-
-    const currentValidSeconds =
-      Number(
-        session.valid_seconds || 0
       );
 
     const challengeIsDue =
@@ -441,9 +438,9 @@ const heartbeatStream = async (
     let challengePassed =
       session.challenge_passed === true;
 
-    // -----------------------------------------------------
-    // Process challenge response
-    // -----------------------------------------------------
+    // -------------------------------------------------------
+    // Challenge response
+    // -------------------------------------------------------
 
     if (
       session.challenge_required &&
@@ -463,22 +460,16 @@ const heartbeatStream = async (
       );
     }
 
-    // -----------------------------------------------------
-    // Calculate verified time
-    // -----------------------------------------------------
+    // -------------------------------------------------------
+    // Calculate verified seconds
+    // -------------------------------------------------------
 
     let addedSeconds = 0;
 
     if (isActive) {
 
-      // ---------------------------------------------------
-      // FIRST heartbeat
-      //
-      // This does NOT credit time.
-      //
-      // It only establishes the server heartbeat clock.
-      // ---------------------------------------------------
-
+      // FIRST heartbeat:
+      // establish verification clock only.
       if (!session.last_heartbeat) {
 
         addedSeconds = 0;
@@ -498,14 +489,21 @@ const heartbeatStream = async (
             ) / 1000
           );
 
-        /*
-         * Credit only reasonable heartbeat gaps.
-         *
-         * 5 sec -> credit
-         * 8 sec -> credit
-         * 15 sec -> credit
-         * >15 sec -> no credit
-         */
+        // ---------------------------------------------------
+        // Only credit reasonable heartbeat gaps.
+        //
+        // Normal:
+        // 5 seconds -> credit
+        //
+        // Slight delay:
+        // 8 seconds -> credit
+        //
+        // Maximum:
+        // 15 seconds -> credit
+        //
+        // More than 15 seconds -> 0
+        // ---------------------------------------------------
+
         if (
           gapSeconds > 0 &&
           gapSeconds <=
@@ -522,17 +520,17 @@ const heartbeatStream = async (
       }
     }
 
-    // -----------------------------------------------------
-    // If page isn't visible/focused, do NOT credit time.
-    // -----------------------------------------------------
+    // -------------------------------------------------------
+    // Never credit when page isn't active.
+    // -------------------------------------------------------
 
     if (!isActive) {
       addedSeconds = 0;
     }
 
-    // -----------------------------------------------------
-    // New verified time
-    // -----------------------------------------------------
+    // -------------------------------------------------------
+    // New verified seconds
+    // -------------------------------------------------------
 
     const newValidSeconds =
       Math.min(
@@ -541,9 +539,9 @@ const heartbeatStream = async (
           addedSeconds
       );
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Record heartbeat
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     await client.query(
       `
@@ -572,9 +570,9 @@ const heartbeatStream = async (
       ]
     );
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Update session
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     await client.query(
       `
@@ -599,14 +597,19 @@ const heartbeatStream = async (
       'COMMIT'
     );
 
-    // -----------------------------------------------------
-    // Determine challenge state
-    // -----------------------------------------------------
+    // -------------------------------------------------------
+    // Challenge status after update
+    // -------------------------------------------------------
 
     const challengeRequiredNow =
       session.challenge_required &&
       !challengePassed &&
-      newValidSeconds >= challengeDue;
+      newValidSeconds >=
+        challengeDue;
+
+    // -------------------------------------------------------
+    // Completion
+    // -------------------------------------------------------
 
     const complete =
       newValidSeconds >=
@@ -689,9 +692,9 @@ const endStream = async (
       'BEGIN'
     );
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Lock session
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     const sessionResult =
       await client.query(
@@ -739,27 +742,27 @@ const endStream = async (
       });
     }
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // SERVER-SIDE VERIFIED TIME
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     const validSeconds =
       Number(
         session.valid_seconds || 0
       );
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Challenge
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     const challengePassed =
       session.challenge_required
         ? session.challenge_passed === true
         : true;
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Not enough verified time
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     if (
       validSeconds <
@@ -802,9 +805,9 @@ const endStream = async (
       });
     }
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Challenge not passed
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     if (!challengePassed) {
 
@@ -844,9 +847,9 @@ const endStream = async (
       });
     }
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Get reward
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     let coinsToAward = 30;
 
@@ -892,9 +895,9 @@ const endStream = async (
       coinsToAward = 30;
     }
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Daily earnings
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     const earnedResult =
       await client.query(
@@ -919,9 +922,9 @@ const endStream = async (
         10
       );
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Daily cap
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     if (
       todayTotal >= DAILY_CAP
@@ -968,6 +971,10 @@ const endStream = async (
       });
     }
 
+    // -------------------------------------------------------
+    // Actual reward
+    // -------------------------------------------------------
+
     const actualCoins =
       Math.min(
         coinsToAward,
@@ -975,9 +982,9 @@ const endStream = async (
           todayTotal
       );
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Complete session
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     await client.query(
       `
@@ -996,9 +1003,9 @@ const endStream = async (
       ]
     );
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Increment track streams
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     if (session.track_id) {
 
@@ -1041,9 +1048,9 @@ const endStream = async (
       }
     }
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Credit wallet
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     await client.query(
       `
@@ -1061,9 +1068,9 @@ const endStream = async (
       ]
     );
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Record transaction
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     await client.query(
       `
@@ -1103,9 +1110,9 @@ const endStream = async (
       ]
     );
 
-    // -----------------------------------------------------
+    // -------------------------------------------------------
     // Get new balance
-    // -----------------------------------------------------
+    // -------------------------------------------------------
 
     const balanceResult =
       await client.query(
