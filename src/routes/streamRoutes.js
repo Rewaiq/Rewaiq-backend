@@ -6,6 +6,7 @@ const {
   startStream,
   heartbeatStream,
   endStream,
+  cancelActiveStream,
   getStreamHistory
 } = require('../controllers/streamController');
 
@@ -25,14 +26,12 @@ router.post(
   startStream
 );
 
-
 // Verified heartbeat
 router.post(
   '/heartbeat',
   protect,
   heartbeatStream
 );
-
 
 // Complete/end stream
 router.post(
@@ -41,6 +40,12 @@ router.post(
   endStream
 );
 
+// Cancel/reset active session so user can start fresh
+router.post(
+  '/reset',
+  protect,
+  cancelActiveStream
+);
 
 // User stream history
 router.get(
@@ -48,6 +53,5 @@ router.get(
   protect,
   getStreamHistory
 );
-
 
 module.exports = router;
