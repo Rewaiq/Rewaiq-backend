@@ -301,8 +301,14 @@ const heartbeatStream = async (
     visible,
     focused,
     playback_started,
-    challenge_response
+    challenge_response,
+    challenge_answer
   } = req.body;
+
+  const resolvedChallengeResponse =
+    challenge_response !== undefined
+      ? challenge_response
+      : challenge_answer;
 
   const client =
     await pool.connect();
@@ -446,7 +452,7 @@ const heartbeatStream = async (
       session.challenge_required &&
       !challengePassed &&
       challengeIsDue &&
-      challenge_response === true
+      resolvedChallengeResponse === true
     ) {
       challengePassed = true;
 
@@ -468,8 +474,7 @@ const heartbeatStream = async (
 
     if (isActive) {
 
-      // FIRST heartbeat:
-      // establish verification clock only.
+      // FIRST heartbeat: establish verification clock only.
       if (!session.last_heartbeat) {
 
         addedSeconds = 0;
@@ -489,21 +494,6 @@ const heartbeatStream = async (
             ) / 1000
           );
 
-        // ---------------------------------------------------
-        // Only credit reasonable heartbeat gaps.
-        //
-        // Normal:
-        // 5 seconds -> credit
-        //
-        // Slight delay:
-        // 8 seconds -> credit
-        //
-        // Maximum:
-        // 15 seconds -> credit
-        //
-        // More than 15 seconds -> 0
-        // ---------------------------------------------------
-
         if (
           gapSeconds > 0 &&
           gapSeconds <=
@@ -519,10 +509,6 @@ const heartbeatStream = async (
         }
       }
     }
-
-    // -------------------------------------------------------
-    // Never credit when page isn't active.
-    // -------------------------------------------------------
 
     if (!isActive) {
       addedSeconds = 0;
@@ -1184,6 +1170,42 @@ const endStream = async (
 
 
 // =========================================================
+// CANCEL / RESET ACTIVE SESSION
+// =========================================================
+
+const cancelActiveStream = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    await pool.query(
+      `
+      UPDATE stream_sessions
+      SET
+        status = 'failed',
+        end_time = NOW(),
+        duration_seconds = GREATEST(
+          0,
+          EXTRACT(EPOCH FROM (NOW() - start_time))::integer
+        ),
+        coins_earned = 0
+      WHERE user_id = $1
+        AND status = 'active'
+      `,
+      [userId]
+    );
+
+    return res.json({
+      success: true,
+      message: 'Active stream sessions cleared successfully'
+    });
+  } catch (err) {
+    console.error('Cancel stream error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
+// =========================================================
 // STREAM HISTORY
 // =========================================================
 
@@ -1239,5 +1261,6 @@ module.exports = {
   startStream,
   heartbeatStream,
   endStream,
+  cancelActiveStream,
   getStreamHistory
 };
