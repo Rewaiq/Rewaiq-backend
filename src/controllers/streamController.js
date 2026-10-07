@@ -90,14 +90,14 @@ const startStream = async (req, res) => {
     }
 
     // -------------------------------------------------------
-    // Clean stale sessions
+    // Clean stale sessions (older than 10 mins)
     // -------------------------------------------------------
 
     await pool.query(
       `
       UPDATE stream_sessions
       SET
-        status = 'failed',
+        status = 'abandoned',
         end_time = NOW(),
         duration_seconds =
           GREATEST(
@@ -116,36 +116,30 @@ const startStream = async (req, res) => {
     );
 
     // -------------------------------------------------------
-    // Prevent multiple active sessions
+    // AUTO-CLEAR ANY PREVIOUS UNFINISHED ACTIVE SESSIONS
+    // Marks prior session as 'abandoned' so the user is never locked out.
     // -------------------------------------------------------
 
-    const existing = await pool.query(
+    await pool.query(
       `
-      SELECT
-        id,
-        track_id,
-        start_time
-      FROM stream_sessions
+      UPDATE stream_sessions
+      SET
+        status = 'abandoned',
+        end_time = NOW(),
+        duration_seconds =
+          GREATEST(
+            0,
+            EXTRACT(
+              EPOCH FROM
+              (NOW() - start_time)
+            )::integer
+          ),
+        coins_earned = 0
       WHERE user_id = $1
         AND status = 'active'
-      ORDER BY start_time DESC
-      LIMIT 1
       `,
       [userId]
     );
-
-    if (existing.rows.length > 0) {
-      return res.status(400).json({
-        message:
-          'You already have an active stream session',
-
-        session_id:
-          existing.rows[0].id,
-
-        track_id:
-          existing.rows[0].track_id
-      });
-    }
 
     // -------------------------------------------------------
     // One rewarded stream per track per day
@@ -747,7 +741,7 @@ const endStream = async (
         : true;
 
     // -------------------------------------------------------
-    // Not enough verified time
+    // Not enough verified time -> Mark abandoned
     // -------------------------------------------------------
 
     if (
@@ -759,7 +753,7 @@ const endStream = async (
         `
         UPDATE stream_sessions
         SET
-          status = 'failed',
+          status = 'abandoned',
           end_time = NOW(),
           duration_seconds =
             GREATEST(
@@ -1181,7 +1175,7 @@ const cancelActiveStream = async (req, res) => {
       `
       UPDATE stream_sessions
       SET
-        status = 'failed',
+        status = 'abandoned',
         end_time = NOW(),
         duration_seconds = GREATEST(
           0,
@@ -1206,7 +1200,7 @@ const cancelActiveStream = async (req, res) => {
 
 
 // =========================================================
-// STREAM HISTORY
+// STREAM HISTORY (Completed & Abandoned)
 // =========================================================
 
 const getStreamHistory = async (
@@ -1221,7 +1215,9 @@ const getStreamHistory = async (
         `
         SELECT
           s.*,
-          t.title AS track_title
+          t.title AS track_title,
+          t.artist_name,
+          t.cover_image
         FROM stream_sessions s
         LEFT JOIN tracks t
           ON s.track_id = t.id
@@ -1254,6 +1250,46 @@ const getStreamHistory = async (
 
 
 // =========================================================
+// GET UNFINISHED / ABANDONED STREAMS
+// =========================================================
+
+const getAbandonedStreams = async (req, res) => {
+  try {
+    const sessions = await pool.query(
+      `
+      SELECT
+        s.id AS session_id,
+        s.track_id,
+        s.valid_seconds,
+        s.duration_seconds,
+        s.start_time,
+        s.end_time,
+        s.status,
+        t.title AS track_title,
+        t.artist_name,
+        t.cover_image
+      FROM stream_sessions s
+      LEFT JOIN tracks t ON s.track_id = t.id
+      WHERE s.user_id = $1
+        AND s.status IN ('abandoned', 'failed')
+        AND s.start_time >= CURRENT_DATE
+      ORDER BY s.start_time DESC
+      LIMIT 10
+      `,
+      [req.user.id]
+    );
+
+    return res.json({
+      abandoned_sessions: sessions.rows
+    });
+  } catch (err) {
+    console.error('Get abandoned streams error:', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+};
+
+
+// =========================================================
 // EXPORTS
 // =========================================================
 
@@ -1262,5 +1298,6 @@ module.exports = {
   heartbeatStream,
   endStream,
   cancelActiveStream,
-  getStreamHistory
+  getStreamHistory,
+  getAbandonedStreams
 };
