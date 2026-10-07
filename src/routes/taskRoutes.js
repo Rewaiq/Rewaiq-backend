@@ -1,84 +1,50 @@
 const express = require('express');
 const router = express.Router();
-const pool = require('../config/db');
-const { protect } = require('../middleware/auth');
+
 const {
-  createTask, getAllTasks, getMyTasks
+  getAllTasks,
+  getTask,
+  completeTask,
+  createTask,
+  approveTask,
+  getMyTasks
 } = require('../controllers/taskController');
 
-// Create task (admin)
-router.post('/create', protect, createTask);
+const { protect } = require('../middleware/auth');
 
-// Get all tasks
+// =========================================================
+// SPECIFIC & COLLECTION ROUTES (MUST BE BEFORE /:id)
+// =========================================================
+
+// Get all active tasks
 router.get('/', protect, getAllTasks);
 
-// Get my completed tasks
-router.get('/mine', protect, getMyTasks);
+// Get current user's completed/pending tasks
+router.get('/my-tasks', protect, getMyTasks);
 
-// Get single task — must be before /:id/complete
-router.get('/:id', protect, async (req, res) => {
-  try {
-    const task = await pool.query(
-      `SELECT t.*,
-        CASE WHEN tc.user_id IS NOT NULL THEN true ELSE false END as completed
-       FROM tasks t
-       LEFT JOIN task_completions tc
-         ON t.id = tc.task_id AND tc.user_id = $1 AND tc.status = 'approved'
-       WHERE t.id = $2`,
-      [req.user.id, req.params.id]
-    );
-    if (task.rows.length === 0) return res.status(404).json({ message: 'Task not found' });
-    res.json({ task: task.rows[0] });
-  } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+// Create task (Admin)
+router.post('/create', protect, createTask);
+
+// Format 1: POST /api/tasks/complete (task_id in body)
+router.post('/complete', protect, completeTask);
+
+
+// =========================================================
+// PARAMETERIZED ROUTES (/:id)
+// =========================================================
+
+// Format 2: POST /api/tasks/:id/complete (task_id in URL params)
+router.post('/:id/complete', protect, (req, res, next) => {
+  if (!req.body.task_id) {
+    req.body.task_id = req.params.id;
   }
+  return completeTask(req, res, next);
 });
 
-// Complete task with proof
-router.post('/:id/complete', protect, async (req, res) => {
-  const { id } = req.params;
-  const { proof_url } = req.body;
-  try {
-    // Check task exists and is active
-    const task = await pool.query(
-      'SELECT * FROM tasks WHERE id = $1 AND is_active = true',
-      [id]
-    );
-    if (task.rows.length === 0) {
-      return res.status(404).json({ message: 'Task not found or not active' });
-    }
+// Admin approval: PUT /api/tasks/:completion_id/approve
+router.put('/:completion_id/approve', protect, approveTask);
 
-    // Check if already submitted
-    const existing = await pool.query(
-      `SELECT * FROM task_completions WHERE task_id = $1 AND user_id = $2`,
-      [id, req.user.id]
-    );
-    if (existing.rows.length > 0) {
-      return res.status(400).json({ message: 'You have already submitted this task' });
-    }
-
-    // Insert completion
-    await pool.query(
-      `INSERT INTO task_completions (task_id, user_id, proof_url, status, completed_at)
-       VALUES ($1, $2, $3, 'pending', NOW())`,
-      [id, req.user.id, proof_url || '']
-    );
-
-    // Notify admin
-    try {
-      const user = await pool.query('SELECT full_name FROM users WHERE id = $1', [req.user.id]);
-      await pool.query(
-        `INSERT INTO notifications (user_id, title, message, type)
-         SELECT id, 'New Task Submission', $1, 'info'
-         FROM users WHERE role = 'admin' LIMIT 1`,
-        [`${user.rows[0]?.full_name} submitted proof for task ID ${id}`]
-      );
-    } catch (e) {}
-
-    res.status(201).json({ message: 'Task submitted for review successfully' });
-  } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-});
+// Single task fetch
+router.get('/:id', protect, getTask);
 
 module.exports = router;
