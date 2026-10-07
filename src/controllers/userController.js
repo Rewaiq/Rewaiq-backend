@@ -1,5 +1,4 @@
 const pool = require('../config/db');
-const { cloudinary } = require('../config/cloudinary');
 
 // =========================================================
 // GET PROFILE
@@ -18,10 +17,59 @@ const getProfile = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    res.json({ user: user.rows[0] });
+    // Ensure referral_count accurately reflects database records
+    const refCountQuery = await pool.query(
+      'SELECT COUNT(*) FROM users WHERE referred_by = $1',
+      [req.user.id]
+    );
+    const count = parseInt(refCountQuery.rows[0]?.count || 0, 10);
+    const profileData = { ...user.rows[0], referral_count: count };
+
+    return res.json({ user: profileData });
   } catch (err) {
     console.error('Get profile error:', err);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    return res.status(500).json({ message: 'Server error', error: err.message });
+  }
+};
+
+// =========================================================
+// GET MY REFERRED USERS
+// =========================================================
+const getMyReferrals = async (req, res) => {
+  const userId = req.user.id;
+
+  try {
+    const result = await pool.query(
+      `
+      SELECT 
+        u.id AS user_id,
+        u.full_name,
+        u.is_email_verified,
+        u.created_at,
+        COALESCE(r.coins_awarded, 100) AS coins_awarded,
+        COALESCE(r.status, CASE WHEN u.is_email_verified THEN 'completed' ELSE 'pending' END) AS status,
+        CONCAT(
+          SUBSTRING(u.email FROM 1 FOR 2),
+          '***@',
+          SPLIT_PART(u.email, '@', 2)
+        ) AS masked_email
+      FROM users u
+      LEFT JOIN referrals r 
+        ON r.referred_id = u.id AND r.referrer_id = $1
+      WHERE u.referred_by = $1
+      ORDER BY u.created_at DESC
+      `,
+      [userId]
+    );
+
+    return res.json({
+      success: true,
+      total_referrals: result.rows.length,
+      referrals: result.rows
+    });
+  } catch (err) {
+    console.error('Get my referrals error:', err);
+    return res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
@@ -41,13 +89,13 @@ const updateProfile = async (req, res) => {
       [full_name, phone, bio, req.user.id]
     );
 
-    res.json({
+    return res.json({
       message: 'Profile updated successfully',
       user: updated.rows[0]
     });
   } catch (err) {
     console.error('Update profile error:', err);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    return res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
@@ -64,14 +112,13 @@ const uploadProfilePicture = async (req, res) => {
       'UPDATE users SET profile_picture = $1 WHERE id = $2',
       [imageUrl, req.user.id]
     );
-
-    res.json({
+    return res.json({
       message: 'Profile picture updated successfully',
       profile_picture: imageUrl
     });
   } catch (err) {
     console.error('Upload profile pic error:', err);
-    res.status(500).json({ message: 'Server error', error: err.message });
+    return res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
@@ -85,63 +132,20 @@ const updateInterests = async (req, res) => {
       'UPDATE users SET interests = $1 WHERE id = $2',
       [interests, req.user.id]
     );
-
-    res.json({
+    return res.json({
       message: 'Interests updated successfully',
       interests
     });
   } catch (err) {
     console.error('Update interests error:', err);
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-};
-
-// =========================================================
-// GET MY REFERRED USERS (For User Referral Dashboard)
-// =========================================================
-const getMyReferrals = async (req, res) => {
-  const userId = req.user.id;
-
-  try {
-    const result = await pool.query(
-      `
-      SELECT 
-        r.id AS referral_id,
-        r.coins_awarded,
-        r.status,
-        r.created_at,
-        u.id AS user_id,
-        u.full_name,
-        u.is_email_verified,
-        -- Mask email for user privacy (e.g., s***i@gmail.com)
-        CONCAT(
-          SUBSTRING(u.email FROM 1 FOR 1),
-          '***',
-          SUBSTRING(u.email FROM POSITION('@' IN u.email) - 1)
-        ) AS masked_email
-      FROM referrals r
-      JOIN users u ON r.referred_id = u.id
-      WHERE r.referrer_id = $1
-      ORDER BY r.created_at DESC
-      `,
-      [userId]
-    );
-
-    return res.json({
-      success: true,
-      total_referrals: result.rows.length,
-      referrals: result.rows
-    });
-  } catch (err) {
-    console.error('Get my referrals error:', err);
     return res.status(500).json({ message: 'Server error', error: err.message });
   }
 };
 
 module.exports = {
   getProfile,
+  getMyReferrals,
   updateProfile,
   uploadProfilePicture,
-  updateInterests,
-  getMyReferrals
+  updateInterests
 };
