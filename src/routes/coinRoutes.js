@@ -3,6 +3,40 @@ const router = express.Router();
 const pool = require('../config/db');
 const https = require('https');
 const { protect } = require('../middleware/auth');
+const { logActivity, sendNotification } = require('../middleware/activityLogger');
+
+const MIN_CASHOUT_COINS = 500; // 500 coins = N250
+const COIN_RATE = 2; // 2 coins = N1
+
+// Utility: Verify Bank Account via Paystack
+const resolveBankAccount = (accountNumber, bankCode) => {
+  return new Promise((resolve) => {
+    const options = {
+      hostname: 'api.paystack.co',
+      port: 443,
+      path: `/bank/resolve?account_number=${accountNumber}&bank_code=${bankCode}`,
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => (data += chunk));
+      res.on('end', () => {
+        try {
+          resolve(JSON.parse(data));
+        } catch {
+          resolve({ status: false });
+        }
+      });
+    });
+
+    req.on('error', () => resolve({ status: false }));
+    req.end();
+  });
+};
 
 // GET BALANCE
 router.get('/balance', protect, async (req, res) => {
@@ -17,213 +51,168 @@ router.get('/balance', protect, async (req, res) => {
   }
 });
 
-// EARN COINS
-router.post('/earn', protect, async (req, res) => {
-  const { amount, type = 'task_reward' } = req.body;
-  try {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-
-    const earned = await pool.query(
-      `SELECT COALESCE(SUM(amount), 0) as total
-       FROM transactions
-       WHERE user_id = $1 
-       AND type IN ('stream_earn', 'task_reward', 'referral_reward')
-       AND status = 'completed'
-       AND created_at >= $2`,
-      [req.user.id, today]
-    );
-
-    const todayTotal = parseInt(earned.rows[0].total);
-    const DAILY_CAP = 500;
-
-    if (todayTotal >= DAILY_CAP) {
-      return res.status(429).json({
-        message: `Daily earning limit reached (${DAILY_CAP} coins). Come back tomorrow!`,
-        coins_earned_today: todayTotal,
-        daily_cap: DAILY_CAP
-      });
-    }
-
-    const remaining = DAILY_CAP - todayTotal;
-    const actualAmount = Math.min(amount, remaining);
-
-    await pool.query(
-      'UPDATE users SET coin_balance = coin_balance + $1 WHERE id = $2',
-      [actualAmount, req.user.id]
-    );
-
-    await pool.query(
-      `INSERT INTO transactions (user_id, amount, type, status)
-       VALUES ($1, $2, $3, 'completed')`,
-      [req.user.id, actualAmount, type]
-    );
-
-    const newBalance = await pool.query(
-      'SELECT coin_balance FROM users WHERE id = $1',
-      [req.user.id]
-    );
-
-    res.json({
-      message: `Earned ${actualAmount} coins`,
-      coins_earned: actualAmount,
-      coin_balance: newBalance.rows[0].coin_balance,
-      coins_earned_today: todayTotal + actualAmount,
-      daily_cap: DAILY_CAP
-    });
-  } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
-  }
-});
-
-// VERIFY BANK ACCOUNT
-router.post('/verify-account', protect, async (req, res) => {
-  const { account_number, bank_code } = req.body;
-  try {
-    if (!account_number || !bank_code) {
-      return res.status(400).json({ message: 'Account number and bank code required' });
-    }
-
-    const result = await new Promise((resolve) => {
-      const options = {
-        hostname: 'api.paystack.co',
-        port: 443,
-        path: `/bank/resolve?account_number=${account_number}&bank_code=${bank_code}`,
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`
-        }
-      };
-      https.request(options, (paystackRes) => {
-        let data = '';
-        paystackRes.on('data', chunk => data += chunk);
-        paystackRes.on('end', () => {
-          try { resolve(JSON.parse(data)); }
-          catch { resolve({ status: false }); }
-        });
-      }).on('error', () => resolve({ status: false })).end();
-    });
-
-    if (result.status) {
-      res.json({
-        verified: true,
-        account_name: result.data.account_name,
-        account_number: result.data.account_number,
-      });
-    } else {
-      res.status(400).json({ verified: false, message: 'Account not found. Check your account number and bank.' });
-    }
-  } catch (err) {
-    res.status(500).json({ message: 'Verification failed', error: err.message });
-  }
-});
-
-// GET BANKS LIST
+// GET BANKS LIST (Paystack with Fallback)
 router.get('/banks', protect, async (req, res) => {
   try {
+    const options = {
+      hostname: 'api.paystack.co',
+      port: 443,
+      path: '/bank?country=nigeria&perPage=100',
+      method: 'GET',
+      headers: { Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}` },
+    };
+
     const result = await new Promise((resolve) => {
-      const options = {
-        hostname: 'api.paystack.co',
-        port: 443,
-        path: '/bank?country=nigeria&perPage=100',
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`
-        }
-      };
       https.request(options, (paystackRes) => {
         let data = '';
-        paystackRes.on('data', chunk => data += chunk);
+        paystackRes.on('data', (chunk) => (data += chunk));
         paystackRes.on('end', () => {
-          try { resolve(JSON.parse(data)); }
-          catch { resolve({ status: false }); }
+          try {
+            resolve(JSON.parse(data));
+          } catch {
+            resolve({ status: false });
+          }
         });
       }).on('error', () => resolve({ status: false })).end();
     });
 
-    if (result.status) {
-      res.json({ banks: result.data });
-    } else {
-      // Return hardcoded list as fallback
-      res.json({ banks: NIGERIAN_BANKS });
+    if (result.status && result.data) {
+      return res.json({ banks: result.data });
     }
+    return res.json({ banks: NIGERIAN_BANKS });
   } catch (err) {
-    res.json({ banks: NIGERIAN_BANKS });
+    return res.json({ banks: NIGERIAN_BANKS });
   }
 });
 
-// CASHOUT REQUEST — MANUAL PROCESSING
+// VERIFY ACCOUNT NUMBER DIRECTLY
+router.post('/verify-account', protect, async (req, res) => {
+  const { account_number, bank_code } = req.body;
+  if (!account_number || !bank_code) {
+    return res.status(400).json({ message: 'Account number and bank code required' });
+  }
+
+  try {
+    const paystackRes = await resolveBankAccount(account_number, bank_code);
+
+    if (paystackRes.status && paystackRes.data) {
+      return res.json({
+        verified: true,
+        account_name: paystackRes.data.account_name,
+        account_number: paystackRes.data.account_number,
+      });
+    }
+
+    return res.status(400).json({
+      verified: false,
+      message: 'Account not found. Verify your account number and selected bank.',
+    });
+  } catch (err) {
+    return res.status(500).json({ message: 'Verification failed', error: err.message });
+  }
+});
+
+// SECURE ATOMIC CASHOUT
 router.post('/cashout', protect, async (req, res) => {
   const { amount, bank_code, account_number, account_name, bank_name } = req.body;
+  const coinsToDeduct = parseInt(amount, 10);
+
+  // 1. Minimum check
+  if (!coinsToDeduct || isNaN(coinsToDeduct) || coinsToDeduct < MIN_CASHOUT_COINS) {
+    return res.status(400).json({
+      message: `Minimum cashout is ${MIN_CASHOUT_COINS} coins (₦${MIN_CASHOUT_COINS / COIN_RATE})`,
+    });
+  }
+
+  if (!bank_code || !account_number || !account_name) {
+    return res.status(400).json({ message: 'Complete bank account details are required' });
+  }
+
+  const nairaAmount = Math.floor(coinsToDeduct / COIN_RATE);
+  const client = await pool.connect();
+
   try {
-    const user = await pool.query(
-      'SELECT coin_balance FROM users WHERE id = $1',
+    await client.query('BEGIN');
+
+    // 2. Lock user row to eliminate double-spend race conditions
+    const userResult = await client.query(
+      'SELECT coin_balance FROM users WHERE id = $1 FOR UPDATE',
       [req.user.id]
     );
-    const coinBalance = parseInt(user.rows[0]?.coin_balance || 0);
 
-    const MIN_CASHOUT_COINS = 500;
-
-if (!amount || parseInt(amount) < MIN_CASHOUT_COINS) {
-  return res.status(400).json({ message: `Minimum cashout is ${MIN_CASHOUT_COINS} coins` });
-}
-    if (coinBalance < parseInt(amount)) {
-      return res.status(400).json({ message: 'Insufficient coin balance' });
-    }
-    if (!bank_code || !account_number || !account_name) {
-      return res.status(400).json({ message: 'Bank details required' });
+    if (userResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ message: 'User not found' });
     }
 
-    const nairaAmount = Math.floor(parseInt(amount) / 2);
+    const currentBalance = parseInt(userResult.rows[0].coin_balance || 0, 10);
 
-    // Deduct coins
-    await pool.query(
-      'UPDATE users SET coin_balance = coin_balance - $1 WHERE id = $2',
-      [parseInt(amount), req.user.id]
+    if (currentBalance < coinsToDeduct) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        message: `Insufficient coin balance. You have ${currentBalance.toLocaleString()} coins.`,
+      });
+    }
+
+    // 3. Deduct coins atomically
+    await client.query(
+      'UPDATE users SET coin_balance = coin_balance - $1, updated_at = NOW() WHERE id = $2',
+      [coinsToDeduct, req.user.id]
     );
 
-    // Record transaction
-    const transaction = await pool.query(
-      `INSERT INTO transactions (user_id, amount, type, status, metadata)
-       VALUES ($1, $2, 'cashout', 'pending', $3) RETURNING id`,
-      [req.user.id, parseInt(amount), JSON.stringify({
-        naira_amount: nairaAmount,
-        bank_name: bank_name || '',
-        bank_code,
-        account_number,
-        account_name,
-      })]
+    // 4. Record ledger transaction
+    const metadata = {
+      naira_amount: nairaAmount,
+      bank_name: bank_name || '',
+      bank_code,
+      account_number,
+      account_name,
+      requested_at: new Date().toISOString(),
+    };
+
+    const transaction = await client.query(
+      `INSERT INTO transactions (user_id, amount, type, status, metadata, created_at)
+       VALUES ($1, $2, 'cashout', 'pending', $3, NOW())
+       RETURNING id`,
+      [req.user.id, coinsToDeduct, JSON.stringify(metadata)]
     );
 
-    // Notify admin
-    try {
-      await pool.query(
-        `INSERT INTO notifications (user_id, title, message, type)
-         SELECT id, 'New Cashout Request', $1, 'info'
-         FROM users WHERE role = 'admin' LIMIT 1`,
-        [`${account_name} requests N${nairaAmount.toLocaleString()} — ${bank_name} — ${account_number}`]
-      );
-    } catch (e) {}
+    // 5. User In-App Notification
+    await client.query(
+      `INSERT INTO notifications (user_id, title, message, type, is_read, created_at)
+       VALUES ($1, 'Cashout Request Submitted', $2, 'info', false, NOW())`,
+      [
+        req.user.id,
+        `Your withdrawal of ₦${nairaAmount.toLocaleString()} (${coinsToDeduct} coins) is being processed. Dispatches complete within 24 hours.`,
+      ]
+    );
 
-    // Notify user
-    try {
-      await pool.query(
-        `INSERT INTO notifications (user_id, title, message, type)
-         VALUES ($1, 'Cashout Request Received', $2, 'info')`,
-        [req.user.id, `Your cashout of N${nairaAmount.toLocaleString()} NGN is being processed. You will receive payment within 24 hours.`]
-      );
-    } catch (e) {}
+    await client.query('COMMIT');
 
-    res.json({
+    // 6. Security & Audit log
+    if (logActivity) {
+      logActivity(req.user.id, 'cashout_requested', {
+        transaction_id: transaction.rows[0].id,
+        naira: nairaAmount,
+        coins: coinsToDeduct,
+      });
+    }
+
+    return res.json({
+      success: true,
       message: 'Cashout request submitted successfully',
       transaction_id: transaction.rows[0].id,
       naira_amount: nairaAmount,
-      coins_deducted: parseInt(amount),
+      coins_deducted: coinsToDeduct,
       status: 'pending',
-      note: 'Payment will be sent to your bank within 24 hours'
+      note: 'Payment will be sent to your bank within 24 hours',
     });
   } catch (err) {
-    res.status(500).json({ message: 'Server error', error: err.message });
+    await client.query('ROLLBACK');
+    console.error('Cashout transaction failed:', err);
+    return res.status(500).json({ message: 'Server error processing cashout', error: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -242,7 +231,7 @@ router.get('/history', protect, async (req, res) => {
 
     const stats = await pool.query(
       `SELECT 
-        COALESCE(SUM(CASE WHEN type IN ('stream_earn','task_reward','referral_reward') AND status='completed' THEN amount ELSE 0 END), 0) as total_earned,
+        COALESCE(SUM(CASE WHEN type IN ('stream_earn','task_reward','referral_reward','welcome_bonus') AND status='completed' THEN amount ELSE 0 END), 0) as total_earned,
         COALESCE(SUM(CASE WHEN type='cashout' THEN amount ELSE 0 END), 0) as total_cashed_out,
         COUNT(CASE WHEN type='stream_earn' THEN 1 END) as total_streams
        FROM transactions WHERE user_id = $1`,
@@ -251,14 +240,13 @@ router.get('/history', protect, async (req, res) => {
 
     res.json({
       transactions: transactions.rows,
-      stats: stats.rows[0]
+      stats: stats.rows[0],
     });
   } catch (err) {
     res.status(500).json({ message: 'Server error', error: err.message });
   }
 });
 
-// Nigerian banks fallback list
 const NIGERIAN_BANKS = [
   { name: 'Access Bank', code: '044' },
   { name: 'Fidelity Bank', code: '070' },
