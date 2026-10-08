@@ -1,7 +1,7 @@
 const pool = require('../config/db');
 const https = require('https');
 
-// Helper to make Paystack API requests via https
+// Reusable HTTPS helper for Paystack API
 const paystackRequest = (options, postData = null) => {
   return new Promise((resolve) => {
     const req = https.request(options, (res) => {
@@ -27,35 +27,40 @@ const paystackRequest = (options, postData = null) => {
   });
 };
 
-// INITIALIZE CASHOUT (Paystack Transfer Recipient + Atomic DB Update)
-const initializeCashout = async (req, res) => {
-  const { amount, bank_code, account_number, account_name, bank_name } = req.body;
-  const coinsToDeduct = parseInt(amount, 10);
-  const userId = req.user.id;
-
-  // 1. Basic validation
-  if (!coinsToDeduct || isNaN(coinsToDeduct) || !account_number || !bank_code) {
-    return res.status(400).json({
-      success: false,
-      message: 'Account number, bank code, and amount are required',
-    });
-  }
-
-  // 2. Enforce 500 coin minimum (500 coins = N250)
-  if (coinsToDeduct < 500) {
-    return res.status(400).json({
-      success: false,
-      message: 'Minimum cashout is 500 coins (₦250)',
-    });
-  }
-
-  const nairaAmount = Math.floor(coinsToDeduct / 2);
+// CASHOUT CONTROLLER (Atomic transaction + Safe Paystack Recipient fallback)
+const cashout = async (req, res) => {
   const client = await pool.connect();
 
   try {
+    const {
+      amount,
+      account_number,
+      bank_code,
+      bank_name,
+      account_name,
+    } = req.body;
+
+    const userId = req.user.id;
+    const coinsToDeduct = parseInt(amount, 10);
+
+    // 1. Validate Input
+    if (!coinsToDeduct || isNaN(coinsToDeduct) || !account_number || !bank_code) {
+      return res.status(400).json({
+        success: false,
+        message: 'Account number, bank code, and amount are required',
+      });
+    }
+
+    if (coinsToDeduct < 500) {
+      return res.status(400).json({
+        success: false,
+        message: 'Minimum cashout is 500 coins (₦250)',
+      });
+    }
+
     await client.query('BEGIN');
 
-    // 3. Lock user row to prevent race conditions / double spending
+    // 2. Lock user row to prevent race conditions / duplicate deductions
     const userResult = await client.query(
       'SELECT coin_balance FROM users WHERE id = $1 FOR UPDATE',
       [userId]
@@ -76,44 +81,54 @@ const initializeCashout = async (req, res) => {
       });
     }
 
-    // 4. Create Transfer Recipient on Paystack
-    const recipientPayload = JSON.stringify({
-      type: 'nuban',
-      name: account_name || 'Verified User',
-      account_number,
-      bank_code,
-      currency: 'NGN',
-    });
-
-    const options = {
-      hostname: 'api.paystack.co',
-      port: 443,
-      path: '/transferrecipient',
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
-        'Content-Type': 'application/json',
-      },
-    };
-
-    const recipientRes = await paystackRequest(options, recipientPayload);
-
-    // Even if Paystack recipient creation fails, handle cleanly without 500 crashing
-    const recipientCode = recipientRes?.status ? recipientRes.data?.recipient_code : null;
-
-    // 5. Deduct coins from user balance
+    // 3. Deduct coins atomically from balance
     await client.query(
       'UPDATE users SET coin_balance = coin_balance - $1, updated_at = NOW() WHERE id = $2',
       [coinsToDeduct, userId]
     );
 
-    // 6. Record transaction with complete payout metadata
+    const nairaAmount = Math.floor(coinsToDeduct / 2);
+    const finalAccountName = account_name || 'Verified User';
+
+    // 4. Register Paystack Recipient in the background (Non-blocking)
+    let recipientCode = null;
+    if (process.env.PAYSTACK_SECRET_KEY) {
+      try {
+        const recipientPayload = JSON.stringify({
+          type: 'nuban',
+          name: finalAccountName,
+          account_number,
+          bank_code,
+          currency: 'NGN',
+        });
+
+        const options = {
+          hostname: 'api.paystack.co',
+          port: 443,
+          path: '/transferrecipient',
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            'Content-Type': 'application/json',
+          },
+        };
+
+        const recipientRes = await paystackRequest(options, recipientPayload);
+        if (recipientRes && recipientRes.status && recipientRes.data) {
+          recipientCode = recipientRes.data.recipient_code;
+        }
+      } catch (paystackErr) {
+        console.error('Paystack recipient creation skipped:', paystackErr.message);
+      }
+    }
+
+    // 5. Insert Transaction Entry
     const metadata = {
       naira_amount: nairaAmount,
       bank_name: bank_name || '',
       bank_code,
       account_number,
-      account_name: account_name || 'Verified User',
+      account_name: finalAccountName,
       recipient_code: recipientCode,
       requested_at: new Date().toISOString(),
     };
@@ -125,14 +140,14 @@ const initializeCashout = async (req, res) => {
       [userId, coinsToDeduct, JSON.stringify(metadata)]
     );
 
-    // 7. Add In-App User Notification
+    // 6. Send In-App Notification to User
     try {
       await client.query(
         `INSERT INTO notifications (user_id, title, message, type, is_read, created_at)
          VALUES ($1, 'Cashout Request Submitted', $2, 'info', false, NOW())`,
         [
           userId,
-          `Your cashout of ₦${nairaAmount.toLocaleString()} (${coinsToDeduct} coins) has been queued for payout.`,
+          `Your cashout of ₦${nairaAmount.toLocaleString()} (${coinsToDeduct} coins) has been received and is being processed.`,
         ]
       );
     } catch (_) {}
@@ -142,19 +157,20 @@ const initializeCashout = async (req, res) => {
     return res.json({
       success: true,
       message: 'Cashout request submitted successfully',
-      transaction_id: transaction.rows[0].id,
-      naira_amount: nairaAmount,
-      coins_deducted: coinsToDeduct,
-      status: 'pending',
-      note: 'Payment will be sent to your bank account within 24 hours',
+      data: {
+        transaction_id: transaction.rows[0].id,
+        account_name: finalAccountName,
+        naira_amount: nairaAmount,
+        coins_deducted: coinsToDeduct,
+        status: 'pending',
+      },
     });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('Cashout server error:', err);
+    console.error('🚨 DETAILED CASHOUT ERROR:', err);
     return res.status(500).json({
       success: false,
-      message: 'Server error processing cashout',
-      error: err.message,
+      message: err.message || 'Server error processing cashout',
     });
   } finally {
     client.release();
@@ -180,10 +196,10 @@ const getBanks = async (req, res) => {
   return res.json({ banks: [] });
 };
 
-// VERIFY ACCOUNT NUMBER (Supports both query params and body params)
+// VERIFY ACCOUNT NUMBER
 const verifyAccount = async (req, res) => {
-  const account_number = req.query.account_number || req.body.account_number;
-  const bank_code = req.query.bank_code || req.body.bank_code;
+  const account_number = req.query.account_number || req.body?.account_number;
+  const bank_code = req.query.bank_code || req.body?.bank_code;
 
   if (!account_number || !bank_code) {
     return res.status(400).json({ message: 'Account number and bank code required' });
@@ -214,7 +230,8 @@ const verifyAccount = async (req, res) => {
 };
 
 module.exports = {
-  initializeCashout,
-  cashout: initializeCashout, // Alias ensures both route names work
+  cashout,
+  initializeCashout: cashout,
   getBanks,
-  verify
+  verifyAccount,
+};
