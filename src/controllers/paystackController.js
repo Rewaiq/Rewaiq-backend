@@ -1,7 +1,7 @@
 const pool = require('../config/db');
 const https = require('https');
 
-// Reusable HTTPS helper for Paystack API
+// Helper to make Paystack API requests via https
 const paystackRequest = (options, postData = null) => {
   return new Promise((resolve) => {
     const req = https.request(options, (res) => {
@@ -27,7 +27,7 @@ const paystackRequest = (options, postData = null) => {
   });
 };
 
-// CASHOUT CONTROLLER (Atomic transaction + Safe Paystack Recipient fallback)
+// CASHOUT CONTROLLER (Atomic balance deduction & safe metadata logging)
 const cashout = async (req, res) => {
   const client = await pool.connect();
 
@@ -60,7 +60,7 @@ const cashout = async (req, res) => {
 
     await client.query('BEGIN');
 
-    // 2. Lock user row to prevent race conditions / duplicate deductions
+    // 2. Lock user row to eliminate double-spend race conditions
     const userResult = await client.query(
       'SELECT coin_balance FROM users WHERE id = $1 FOR UPDATE',
       [userId]
@@ -81,9 +81,9 @@ const cashout = async (req, res) => {
       });
     }
 
-    // 3. Deduct coins atomically from balance
+    // 3. Deduct coins directly (NO dependency on updated_at column)
     await client.query(
-      'UPDATE users SET coin_balance = coin_balance - $1, updated_at = NOW() WHERE id = $2',
+      'UPDATE users SET coin_balance = coin_balance - $1 WHERE id = $2',
       [coinsToDeduct, userId]
     );
 
