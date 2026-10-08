@@ -23,6 +23,7 @@ const passport = require('./config/passport');
 const artistRoutes = require('./routes/artistRoutes');
 const emailRoutes = require('./routes/emailRoutes');
 const ipBlockMiddleware = require('./middleware/ipBlock');
+const activityLogger = require('./middleware/activityLogger'); // <-- Added
 const campaignRoutes = require('./routes/campaignRoutes');
 
 const app = express();
@@ -33,6 +34,11 @@ app.use('/api/webhooks', webhookRoutes);
 app.use(helmet());
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Activate Activity Logger across all API requests (populates activity_logs)
+app.use(activityLogger); // <-- Added
+
 app.use(session({ secret: process.env.SESSION_SECRET, resave: false, saveUninitialized: false }));
 app.use(passport.initialize());
 app.use(passport.session());
@@ -41,7 +47,6 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/promo', promoRoutes);
 app.use('/api/artist', artistRoutes);
 app.use('/api/campaigns', campaignRoutes);
-
 
 app.get('/', (req, res) => {
   res.json({ message: 'Rewaiq API is live 🚀' });
@@ -87,6 +92,7 @@ const updatePlatformStats = async () => {
 // Run every hour
 setInterval(updatePlatformStats, 60 * 60 * 1000);
 updatePlatformStats(); // Run on startup
+
 // Custom 404
 app.use((req, res) => {
   res.status(404).json({ message: 'Route not found' });
@@ -100,4 +106,5 @@ app.use((err, req, res, next) => {
     status: 'error'
   });
 });
+
 module.exports = app;
