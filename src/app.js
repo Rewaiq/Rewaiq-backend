@@ -17,6 +17,7 @@ const feedRoutes = require('./routes/feedRoutes');
 const trackRoutes = require('./routes/trackRoutes');
 const adminRoutes = require('./routes/adminRoutes');
 const referralRoutes = require('./routes/referralRoutes');
+const foundersLiveRoutes = require('./routes/foundersLiveRoutes');
 const paystackRoutes = require('./routes/paystackRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const passport = require('./config/passport');
@@ -62,6 +63,7 @@ app.use('/api/feed', feedRoutes);
 app.use('/api/tracks', trackRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/referrals', referralRoutes);
+app.use('/api/founders-live', foundersLiveRoutes);
 app.use('/api/paystack', paystackRoutes);
 app.use('/api/email', emailRoutes);
 
